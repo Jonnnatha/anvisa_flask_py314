@@ -25,6 +25,7 @@ def search_by_registration(value: str) -> dict[str, Any]:
             'found': False,
             'source_product': PRODUCTS_PAGE_URL,
             'source_alerts': ALERTS_PAGE_URL,
+            'source_alerts_fallback': 'https://www.gov.br/anvisa/pt-br/assuntos/fiscalizacao-e-monitoramento/tecnovigilancia/alertas-de-tecnovigilancia-1',
             'product': None,
             'alerts_count': 0,
             'alerts': [],
@@ -33,7 +34,7 @@ def search_by_registration(value: str) -> dict[str, Any]:
             'message': 'Registro não encontrado na base consultada da Anvisa.',
         }
 
-    alert_result = find_alerts_by_registration(registro)
+    alert_result = find_alerts_by_registration(registro, product=product)
     alerts = alert_result.get('alerts', [])
 
     return {
@@ -41,10 +42,15 @@ def search_by_registration(value: str) -> dict[str, Any]:
         'found': True,
         'source_product': PRODUCTS_PAGE_URL,
         'source_alerts': ALERTS_PAGE_URL,
+        'source_alerts_fallback': 'https://www.gov.br/anvisa/pt-br/assuntos/fiscalizacao-e-monitoramento/tecnovigilancia/alertas-de-tecnovigilancia-1',
         'product': product,
         'alerts_count': len(alerts),
         'alerts': alerts,
+        'alerts_status': alert_result.get('status'),
         'alerts_warning': alert_result.get('warning'),
+        'alerts_sources': alert_result.get('sources', []),
+        'alerts_reference_links': alert_result.get('reference_links', []),
         'alerts_manual_url': alert_result.get('manual_url'),
+        'alerts_manual_links': alert_result.get('manual_links', {}),
         'message': 'Registro encontrado.' if not alerts else 'Registro encontrado e alertas localizados.',
     }

@@ -17,22 +17,74 @@ function field(label, value) {
   return `<div class="field"><span>${label}</span><strong>${value || '—'}</strong></div>`;
 }
 
+function escapeHtml(value) {
+  return String(value || '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#039;');
+}
+
+function renderStatusBadge(status) {
+  if (!status) return '';
+  const labelByStatus = {
+    success: 'Consulta automática concluída',
+    no_results: 'Sem alertas encontrados',
+    blocked: 'Consulta bloqueada',
+    unavailable: 'Portal indisponível',
+    parsing_error: 'Erro de parsing',
+    partial: 'Consulta parcial com fallback',
+  };
+  const label = labelByStatus[status] || status;
+  return `<p class="meta">Status da busca de alertas: <strong>${escapeHtml(label)}</strong></p>`;
+}
+
 function render(data) {
   const product = data.product || {};
+  const status = data.alerts_status;
+
   const warningHtml = data.alerts_warning
-    ? `<div class="feedback warning">${data.alerts_warning}<br/><a href="${data.alerts_manual_url}" target="_blank" rel="noopener noreferrer">Consultar alertas manualmente no portal oficial</a></div>`
+    ? `<div class="feedback warning">${escapeHtml(data.alerts_warning)}</div>`
     : '';
 
-  const alertsHtml = data.alerts && data.alerts.length
-    ? data.alerts.map(a => `
+  const sourceHtml = Array.isArray(data.alerts_sources) && data.alerts_sources.length
+    ? `<details class="alerts-sources"><summary>Fontes consultadas</summary><ul>${data.alerts_sources.map(s => {
+      const statusLabel = s.status || 'desconhecido';
+      const detail = s.details ? ` — ${escapeHtml(s.details)}` : '';
+      return `<li><strong>${escapeHtml(s.name || 'fonte')}</strong> (${escapeHtml(statusLabel)}) · <a href="${escapeHtml(s.url || '#')}" target="_blank" rel="noopener noreferrer">abrir fonte</a>${detail}</li>`;
+    }).join('')}</ul></details>`
+    : '';
+
+  const referenceLinksHtml = Array.isArray(data.alerts_reference_links) && data.alerts_reference_links.length
+    ? `<div class="manual-links"><p>Referências oficiais para consulta manual:</p><ul>${data.alerts_reference_links.map(item => `
+        <li><a href="${escapeHtml(item.link)}" target="_blank" rel="noopener noreferrer">${escapeHtml(item.title || item.link)}</a></li>
+      `).join('')}</ul></div>`
+    : '';
+
+  const manualLinks = data.alerts_manual_links || {};
+  const manualLinksHtml = (manualLinks.principal || manualLinks.tecnovigilancia)
+    ? `<div class="manual-links"><p>Consulta manual recomendada:</p><ul>
+        ${manualLinks.principal ? `<li><a href="${escapeHtml(manualLinks.principal)}" target="_blank" rel="noopener noreferrer">Portal de alertas (legado)</a></li>` : ''}
+        ${manualLinks.tecnovigilancia ? `<li><a href="${escapeHtml(manualLinks.tecnovigilancia)}" target="_blank" rel="noopener noreferrer">Página oficial de Tecnovigilância (gov.br)</a></li>` : ''}
+      </ul></div>`
+    : '';
+
+  let alertsHtml = '';
+  if (data.alerts && data.alerts.length) {
+    alertsHtml = data.alerts.map(a => `
       <article class="alert-item">
-        <h4>${a.title || 'Alerta sem título'}</h4>
-        <div class="meta">${a.date || 'Data não informada'}${a.number ? ` • Alerta ${a.number}` : ''}</div>
-        <p>${a.summary || ''}</p>
-        <a href="${a.link}" target="_blank" rel="noopener noreferrer">Abrir fonte oficial</a>
+        <h4>${escapeHtml(a.title || 'Alerta sem título')}</h4>
+        <div class="meta">${escapeHtml(a.date || 'Data não informada')}${a.number ? ` • Alerta ${escapeHtml(a.number)}` : ''}</div>
+        <p>${escapeHtml(a.summary || '')}</p>
+        <a href="${escapeHtml(a.link)}" target="_blank" rel="noopener noreferrer">Abrir fonte oficial</a>
       </article>
-    `).join('')
-    : '<p>Nenhum alerta de tecnovigilância encontrado para este registro.</p>';
+    `).join('');
+  } else if (status === 'no_results') {
+    alertsHtml = '<p>Nenhum alerta de tecnovigilância encontrado para os termos consultados.</p>';
+  } else {
+    alertsHtml = '<p>A consulta automática de alertas não foi conclusiva. Use os links oficiais abaixo para validação manual.</p>';
+  }
 
   resultado.innerHTML = `
     <div class="box">
@@ -52,8 +104,12 @@ function render(data) {
     </div>
     <div class="box">
       <h2>Alertas de tecnovigilância (${data.alerts_count || 0})</h2>
+      ${renderStatusBadge(status)}
       ${warningHtml}
       ${alertsHtml}
+      ${sourceHtml}
+      ${manualLinksHtml}
+      ${referenceLinksHtml}
     </div>
   `;
   resultado.classList.remove('hidden');
