@@ -1,0 +1,60 @@
+{% extends 'base.html' %}
+{% block content %}
+<form method="post" action="{{ url_for('main.consultar') }}" class="card">
+  <label for="registro">Número de registro ANVISA</label>
+  <input id="registro" name="registro" type="text" value="{{ registro or '' }}" placeholder="Ex.: 12345678901" required />
+  <button type="submit">Consultar</button>
+</form>
+
+{% if error_message %}
+  <div class="card error">{{ error_message }}</div>
+{% endif %}
+
+{% if technical_error %}
+  <details class="card details">
+    <summary>Detalhes técnicos (opcional)</summary>
+    <code>{{ technical_error }}</code>
+  </details>
+{% endif %}
+
+{% if info_message %}
+  <div class="card warning">{{ info_message }}</div>
+{% endif %}
+
+{% if result and result.product %}
+<section class="card">
+  <h2>Dados do equipamento</h2>
+  <ul>
+    <li><strong>Registro ANVISA:</strong> {{ result.product.registro }}</li>
+    <li><strong>Nome do produto:</strong> {{ result.product.nome_produto }}</li>
+    <li><strong>Marca:</strong> {{ result.product.marca }}</li>
+    <li><strong>Modelo:</strong> {{ result.product.modelo }}</li>
+    <li><strong>Fabricante:</strong> {{ result.product.fabricante }}</li>
+    <li><strong>Detentor do registro:</strong> {{ result.product.detentor }}</li>
+    <li><strong>País de fabricação:</strong> {{ result.product.pais_fabricacao }}</li>
+    <li><strong>Situação do registro:</strong> {{ result.product.situacao }}</li>
+  </ul>
+</section>
+
+<section class="card">
+  <h2>Alertas de tecnovigilância</h2>
+  {% if result.alerts %}
+    <ul>
+    {% for alert in result.alerts %}
+      <li>
+        <strong>{{ alert.titulo }}</strong><br/>
+        Nº alerta: {{ alert.numero }}<br/>
+        Data: {{ alert.data }}<br/>
+        <a href="{{ alert.link }}" target="_blank" rel="noopener noreferrer">Fonte oficial</a>
+      </li>
+    {% endfor %}
+    </ul>
+  {% elif result.automatic_alert_lookup_failed %}
+    <p>Não foi possível consultar alertas automaticamente.</p>
+    <p><a href="{{ result.manual_alert_url }}" target="_blank" rel="noopener noreferrer">Consultar alertas manualmente no portal ANVISA</a></p>
+  {% else %}
+    <p>Nenhum alerta de tecnovigilância encontrado para este registro.</p>
+  {% endif %}
+</section>
+{% endif %}
+{% endblock %}
