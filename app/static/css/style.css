@@ -66,3 +66,23 @@ small { display: block; margin-top: 10px; color: var(--muted); }
   .row, .grid { grid-template-columns: 1fr; display: grid; }
   button { width: 100%; }
 }
+
+.alerts-sources,
+.manual-links {
+  margin-top: 14px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: rgba(17, 24, 39, 0.6);
+}
+
+.alerts-sources ul,
+.manual-links ul {
+  margin: 8px 0 0;
+  padding-left: 18px;
+}
+
+.alerts-sources a,
+.manual-links a {
+  color: #93c5fd;
+}
