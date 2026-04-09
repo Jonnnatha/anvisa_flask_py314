@@ -1,0 +1,67 @@
+:root {
+  --bg: #0f172a;
+  --panel: #111827;
+  --panel-2: #1f2937;
+  --text: #e5e7eb;
+  --muted: #9ca3af;
+  --accent: #22c55e;
+  --danger: #ef4444;
+  --border: #374151;
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  font-family: Arial, Helvetica, sans-serif;
+  background: linear-gradient(180deg, #0b1220, var(--bg));
+  color: var(--text);
+}
+.container {
+  max-width: 980px;
+  margin: 0 auto;
+  padding: 32px 20px 48px;
+}
+.hero h1 { margin: 0 0 8px; font-size: 2rem; }
+.hero p { margin: 0 0 24px; color: var(--muted); }
+.card, .box {
+  background: rgba(17, 24, 39, 0.92);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  padding: 20px;
+  margin-bottom: 18px;
+}
+label { display: block; margin-bottom: 8px; font-weight: 700; }
+.row { display: flex; gap: 12px; }
+input {
+  flex: 1;
+  padding: 14px 16px;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  background: var(--panel-2);
+  color: var(--text);
+  font-size: 1rem;
+}
+button {
+  padding: 14px 20px;
+  border-radius: 10px;
+  border: none;
+  background: var(--accent);
+  color: #06210d;
+  font-weight: 700;
+  cursor: pointer;
+}
+small { display: block; margin-top: 10px; color: var(--muted); }
+.hidden { display: none; }
+.feedback { margin: 16px 0; padding: 14px 16px; border-radius: 10px; }
+.feedback.error { background: rgba(239, 68, 68, 0.15); border: 1px solid rgba(239, 68, 68, 0.4); }
+.feedback.ok { background: rgba(34, 197, 94, 0.12); border: 1px solid rgba(34, 197, 94, 0.35); }
+.grid { display: grid; grid-template-columns: repeat(2, minmax(0,1fr)); gap: 12px; }
+.field { background: var(--panel-2); border: 1px solid var(--border); border-radius: 10px; padding: 12px; }
+.field span { display: block; color: var(--muted); font-size: .86rem; margin-bottom: 6px; }
+.alert-item { padding: 14px; border: 1px solid var(--border); border-radius: 10px; background: var(--panel-2); margin-bottom: 12px; }
+.alert-item h4 { margin: 0 0 8px; }
+.alert-item a { color: #93c5fd; }
+.meta { color: var(--muted); font-size: .92rem; margin-bottom: 8px; }
+@media (max-width: 720px) {
+  .row, .grid { grid-template-columns: 1fr; display: grid; }
+  button { width: 100%; }
+}

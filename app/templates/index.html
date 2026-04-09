@@ -1,0 +1,32 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Consulta ANVISA</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}" />
+</head>
+<body>
+  <main class="container">
+    <section class="hero">
+      <h1>Consulta de Equipamentos por Registro ANVISA</h1>
+      <p>Informe o número do registro ANVISA para localizar os dados do equipamento e os alertas de tecnovigilância relacionados.</p>
+    </section>
+
+    <section class="card">
+      <form id="consulta-form">
+        <label for="registro">Número de registro ANVISA</label>
+        <div class="row">
+          <input id="registro" name="registro" type="text" inputmode="numeric" maxlength="11" placeholder="Ex.: 10349000912" required />
+          <button type="submit">Consultar</button>
+        </div>
+        <small>Digite somente números. O sistema valida 11 dígitos.</small>
+      </form>
+    </section>
+
+    <section id="feedback" class="feedback hidden"></section>
+    <section id="resultado" class="hidden"></section>
+  </main>
+  <script src="{{ url_for('static', filename='js/app.js') }}"></script>
+</body>
+</html>
