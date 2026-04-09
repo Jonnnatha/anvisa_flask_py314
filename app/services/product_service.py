@@ -5,11 +5,12 @@ import io
 import re
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Any
+from urllib.parse import urljoin
 
 from bs4 import BeautifulSoup
 
-from app.core.config import PRODUCTS_PAGE_URL, PRODUCT_CACHE_FILE, PRODUCT_CACHE_TTL_HOURS
+from app.core.config import PRODUCT_CACHE_FILE, PRODUCT_CACHE_TTL_HOURS, PRODUCTS_PAGE_URL
 from app.services.http_client import get
 
 CSV_LINK_RE = re.compile(r'https?://[^\s\"\']+\.csv', re.IGNORECASE)
@@ -22,36 +23,43 @@ def _cache_valid(path: Path) -> bool:
     return datetime.now() - modified < timedelta(hours=PRODUCT_CACHE_TTL_HOURS)
 
 
-def _extract_csv_link(html: str) -> Optional[str]:
+def _normalize(value: str | None) -> str:
+    return re.sub(r'\D', '', value or '')
+
+
+def _extract_csv_link(html: str) -> str | None:
     soup = BeautifulSoup(html, 'html.parser')
-    for a in soup.select('a[href]'):
-        href = a.get('href', '').strip()
+    for anchor in soup.select('a[href]'):
+        href = anchor.get('href', '').strip()
         if href.lower().endswith('.csv'):
             return href
-    m = CSV_LINK_RE.search(html)
-    return m.group(0) if m else None
+    match = CSV_LINK_RE.search(html)
+    return match.group(0) if match else None
 
 
 def ensure_products_csv() -> Path:
     if _cache_valid(PRODUCT_CACHE_FILE):
         return PRODUCT_CACHE_FILE
 
-    page = get(PRODUCTS_PAGE_URL)
-    csv_url = _extract_csv_link(page.text)
-    if not csv_url:
-        raise RuntimeError('Não foi possível localizar o link CSV oficial da Anvisa.')
+    try:
+        page = get(PRODUCTS_PAGE_URL)
+        csv_link = _extract_csv_link(page.text)
+        if not csv_link:
+            raise RuntimeError('Não foi possível localizar o link CSV oficial da Anvisa.')
 
-    csv_response = get(csv_url)
-    PRODUCT_CACHE_FILE.write_bytes(csv_response.content)
-    return PRODUCT_CACHE_FILE
+        csv_url = urljoin(PRODUCTS_PAGE_URL, csv_link)
+        csv_response = get(csv_url)
+        PRODUCT_CACHE_FILE.write_bytes(csv_response.content)
+        return PRODUCT_CACHE_FILE
+    except Exception:
+        # Fallback seguro: se houver cache antigo, segue com ele.
+        if PRODUCT_CACHE_FILE.exists():
+            return PRODUCT_CACHE_FILE
+        raise
 
 
-def _normalize(value: str) -> str:
-    return re.sub(r'\D', '', value or '')
-
-
-def _best_key(row: Dict[str, str], candidates: List[str]) -> Optional[str]:
-    lowered = {k.lower().strip(): k for k in row.keys()}
+def _best_key(row: dict[str, str], candidates: list[str]) -> str | None:
+    lowered = {k.lower().strip(): k for k in row.keys() if k}
     for candidate in candidates:
         for key_lower, original in lowered.items():
             if candidate in key_lower:
@@ -59,16 +67,19 @@ def _best_key(row: Dict[str, str], candidates: List[str]) -> Optional[str]:
     return None
 
 
-def _read_rows() -> List[Dict[str, str]]:
+def _read_rows() -> list[dict[str, str]]:
     csv_path = ensure_products_csv()
     raw = csv_path.read_bytes()
+
+    text = None
     for encoding in ('utf-8-sig', 'latin-1', 'cp1252'):
         try:
             text = raw.decode(encoding)
             break
         except UnicodeDecodeError:
             continue
-    else:
+
+    if text is None:
         raise RuntimeError('Não foi possível decodificar o CSV oficial da Anvisa.')
 
     reader = csv.DictReader(io.StringIO(text), delimiter=';')
@@ -79,8 +90,8 @@ def _read_rows() -> List[Dict[str, str]]:
     return rows
 
 
-def find_product_by_registration(registro: str) -> Optional[Dict[str, str]]:
-    registro = _normalize(registro)
+def find_product_by_registration(registro: str) -> dict[str, Any] | None:
+    normalized = _normalize(registro)
     rows = _read_rows()
     if not rows:
         return None
@@ -91,28 +102,30 @@ def find_product_by_registration(registro: str) -> Optional[Dict[str, str]]:
         return None
 
     for row in rows:
-        if _normalize(row.get(reg_key, '')) == registro:
-            nome_key = _best_key(row, ['nome do produto', 'produto', 'nome'])
-            marca_key = _best_key(row, ['marca'])
-            modelo_key = _best_key(row, ['modelo'])
-            fabricante_key = _best_key(row, ['fabricante'])
-            detentor_key = _best_key(row, ['detentor'])
-            pais_key = _best_key(row, ['pais'])
-            situacao_key = _best_key(row, ['situa'])
-            processo_key = _best_key(row, ['processo'])
-            risco_key = _best_key(row, ['risco'])
+        if _normalize(row.get(reg_key, '')) != normalized:
+            continue
 
-            return {
-                'registro_anvisa': registro,
-                'nome_produto': row.get(nome_key or '', ''),
-                'marca': row.get(marca_key or '', ''),
-                'modelo': row.get(modelo_key or '', ''),
-                'fabricante': row.get(fabricante_key or '', ''),
-                'detentor_registro': row.get(detentor_key or '', ''),
-                'pais_fabricacao': row.get(pais_key or '', ''),
-                'situacao': row.get(situacao_key or '', ''),
-                'processo': row.get(processo_key or '', ''),
-                'classificacao_risco': row.get(risco_key or '', ''),
-                'raw_fields': row,
-            }
+        nome_key = _best_key(row, ['nome do produto', 'produto', 'nome'])
+        marca_key = _best_key(row, ['marca'])
+        modelo_key = _best_key(row, ['modelo'])
+        fabricante_key = _best_key(row, ['fabricante'])
+        detentor_key = _best_key(row, ['detentor'])
+        pais_key = _best_key(row, ['pais'])
+        situacao_key = _best_key(row, ['situa'])
+        processo_key = _best_key(row, ['processo'])
+        risco_key = _best_key(row, ['risco'])
+
+        return {
+            'registro_anvisa': normalized,
+            'nome_produto': row.get(nome_key or '', ''),
+            'marca': row.get(marca_key or '', ''),
+            'modelo': row.get(modelo_key or '', ''),
+            'fabricante': row.get(fabricante_key or '', ''),
+            'detentor_registro': row.get(detentor_key or '', ''),
+            'pais_fabricacao': row.get(pais_key or '', ''),
+            'situacao': row.get(situacao_key or '', ''),
+            'processo': row.get(processo_key or '', ''),
+            'classificacao_risco': row.get(risco_key or '', ''),
+        }
+
     return None

@@ -19,6 +19,10 @@ function field(label, value) {
 
 function render(data) {
   const product = data.product || {};
+  const warningHtml = data.alerts_warning
+    ? `<div class="feedback warning">${data.alerts_warning}<br/><a href="${data.alerts_manual_url}" target="_blank" rel="noopener noreferrer">Consultar alertas manualmente no portal oficial</a></div>`
+    : '';
+
   const alertsHtml = data.alerts && data.alerts.length
     ? data.alerts.map(a => `
       <article class="alert-item">
@@ -48,6 +52,7 @@ function render(data) {
     </div>
     <div class="box">
       <h2>Alertas de tecnovigilância (${data.alerts_count || 0})</h2>
+      ${warningHtml}
       ${alertsHtml}
     </div>
   `;
@@ -70,14 +75,17 @@ form.addEventListener('submit', async (event) => {
   try {
     const response = await fetch(`/api/consultar?registro=${encodeURIComponent(registro)}`);
     const data = await response.json();
-    if (!response.ok && !data.found) {
-      setFeedback(data.message || data.error || 'Registro não encontrado.', 'error');
-      return;
-    }
-    if (data.error) {
+
+    if (!response.ok && data.error) {
       setFeedback(data.error, 'error');
       return;
     }
+
+    if (!data.found) {
+      setFeedback(data.message || 'Registro não encontrado.', 'error');
+      return;
+    }
+
     setFeedback(data.message || 'Consulta realizada com sucesso.', 'ok');
     render(data);
   } catch (err) {

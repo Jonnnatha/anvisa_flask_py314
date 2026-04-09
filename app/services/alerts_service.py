@@ -1,61 +1,85 @@
-import requests
+from __future__ import annotations
+
+import re
+from datetime import datetime
+from typing import Any
+from urllib.parse import urljoin
+
 from bs4 import BeautifulSoup
 
-BASE_ALERTS_URL = "https://antigo.anvisa.gov.br/alertas"
+from app.core.config import ALERTS_PAGE_URL
+from app.services.http_client import get
 
-HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36",
-    "Accept-Language": "pt-BR,pt;q=0.9,en;q=0.8",
-    "Referer": "https://antigo.anvisa.gov.br/",
-}
+ALERT_NUMBER_RE = re.compile(r'(?:alerta\s*n?[ºo]?\s*[:\-]?\s*)(\d+[\w\-/]*)', re.IGNORECASE)
+DATE_RE = re.compile(r'(\d{2}/\d{2}/\d{4})')
 
-def fetch_alerts_by_registration(registro: str):
-    session = requests.Session()
-    session.headers.update(HEADERS)
+
+def _parse_date(text: str) -> str | None:
+    match = DATE_RE.search(text or '')
+    if not match:
+        return None
+    raw = match.group(1)
+    try:
+        return datetime.strptime(raw, '%d/%m/%Y').date().isoformat()
+    except ValueError:
+        return raw
+
+
+def _extract_alert_number(text: str) -> str | None:
+    match = ALERT_NUMBER_RE.search(text or '')
+    return match.group(1) if match else None
+
+
+def _parse_alerts(html: str, registro: str) -> list[dict[str, Any]]:
+    soup = BeautifulSoup(html, 'html.parser')
+    alerts: list[dict[str, Any]] = []
+    seen_links: set[str] = set()
+
+    for link in soup.select('a[href]'):
+        href = link.get('href', '').strip()
+        title = link.get_text(' ', strip=True)
+        if not href or not title:
+            continue
+
+        full_link = urljoin(ALERTS_PAGE_URL, href)
+        lower_title = title.lower()
+        if 'alerta' not in lower_title and registro not in title:
+            continue
+        if full_link in seen_links:
+            continue
+
+        container_text = link.parent.get_text(' ', strip=True) if link.parent else title
+        merged_text = f'{title} {container_text}'
+
+        alerts.append({
+            'title': title,
+            'number': _extract_alert_number(merged_text),
+            'date': _parse_date(merged_text),
+            'summary': container_text[:400],
+            'link': full_link,
+        })
+        seen_links.add(full_link)
+
+    return alerts
+
+
+def find_alerts_by_registration(registro: str) -> dict[str, Any]:
+    manual_url = f'{ALERTS_PAGE_URL}?tagsName={registro}'
 
     try:
-        session.get("https://antigo.anvisa.gov.br/", timeout=30, verify=False)
-
-        response = session.get(
-            BASE_ALERTS_URL,
-            params={"tagsName": registro},
-            timeout=30,
-            verify=False
-        )
-
-        if response.status_code == 403:
-            return {
-                "alerts": [],
-                "warning": "A consulta automática de alertas foi bloqueada pelo portal da Anvisa.",
-                "manual_url": f"{BASE_ALERTS_URL}?tagsName={registro}"
-            }
-
-        response.raise_for_status()
-
-        soup = BeautifulSoup(response.text, "html.parser")
-        alerts = []
-
-        for a in soup.find_all("a", href=True):
-            text = a.get_text(" ", strip=True)
-            href = a["href"]
-
-            if registro in text or "alerta" in text.lower():
-                if not href.startswith("http"):
-                    href = f"https://antigo.anvisa.gov.br{href}"
-                alerts.append({
-                    "title": text,
-                    "link": href
-                })
-
+        response = get(ALERTS_PAGE_URL, params={'tagsName': registro})
+        alerts = _parse_alerts(response.text, registro)
         return {
-            "alerts": alerts,
-            "warning": None,
-            "manual_url": f"{BASE_ALERTS_URL}?tagsName={registro}"
+            'alerts': alerts,
+            'warning': None,
+            'manual_url': manual_url,
         }
-
-    except requests.RequestException as e:
+    except Exception as exc:
         return {
-            "alerts": [],
-            "warning": f"Falha ao consultar alertas automaticamente: {str(e)}",
-            "manual_url": f"{BASE_ALERTS_URL}?tagsName={registro}"
+            'alerts': [],
+            'warning': (
+                'Falha na consulta automática de alertas (possível bloqueio 403, SSL ou '
+                f'indisponibilidade do portal): {exc}'
+            ),
+            'manual_url': manual_url,
         }
