@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import re
-from typing import Any, Dict
+from typing import Any
 
 from app.core.config import ALERTS_PAGE_URL, PRODUCTS_PAGE_URL
 from app.services.alerts_service import find_alerts_by_registration
@@ -15,7 +15,7 @@ def validate_registration(value: str) -> str:
     return registro
 
 
-def search_by_registration(value: str) -> Dict[str, Any]:
+def search_by_registration(value: str) -> dict[str, Any]:
     registro = validate_registration(value)
     product = find_product_by_registration(registro)
 
@@ -28,10 +28,14 @@ def search_by_registration(value: str) -> Dict[str, Any]:
             'product': None,
             'alerts_count': 0,
             'alerts': [],
+            'alerts_warning': None,
+            'alerts_manual_url': f'{ALERTS_PAGE_URL}?tagsName={registro}',
             'message': 'Registro não encontrado na base consultada da Anvisa.',
         }
 
-    alerts = find_alerts_by_registration(registro)
+    alert_result = find_alerts_by_registration(registro)
+    alerts = alert_result.get('alerts', [])
+
     return {
         'registro_anvisa': registro,
         'found': True,
@@ -40,5 +44,7 @@ def search_by_registration(value: str) -> Dict[str, Any]:
         'product': product,
         'alerts_count': len(alerts),
         'alerts': alerts,
+        'alerts_warning': alert_result.get('warning'),
+        'alerts_manual_url': alert_result.get('manual_url'),
         'message': 'Registro encontrado.' if not alerts else 'Registro encontrado e alertas localizados.',
     }
