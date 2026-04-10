@@ -29,12 +29,11 @@ function escapeHtml(value) {
 function renderStatusBadge(status) {
   if (!status) return '';
   const labelByStatus = {
-    success: 'Consulta automática concluída',
-    no_results: 'Sem alertas encontrados',
-    blocked: 'Consulta bloqueada',
-    unavailable: 'Portal indisponível',
-    parsing_error: 'Erro de parsing',
-    partial: 'Consulta parcial com fallback',
+    alerts_found: 'Alertas localizados',
+    no_alerts_found: 'Sem alertas encontrados',
+    blocked_source: 'Fonte bloqueada',
+    partial_result: 'Resultado parcial',
+    manual_validation_required: 'Validação manual necessária',
   };
   const label = labelByStatus[status] || status;
   return `<p class="meta">Status da busca de alertas: <strong>${escapeHtml(label)}</strong></p>`;
@@ -63,11 +62,18 @@ function render(data) {
     : '';
 
   const manualLinks = data.alerts_manual_links || {};
-  const manualLinksHtml = (manualLinks.principal || manualLinks.tecnovigilancia)
+  const manualLinksHtml = (manualLinks.principal || manualLinks.listagem || manualLinks.tecnovigilancia)
     ? `<div class="manual-links"><p>Consulta manual recomendada:</p><ul>
         ${manualLinks.principal ? `<li><a href="${escapeHtml(manualLinks.principal)}" target="_blank" rel="noopener noreferrer">Portal de alertas (legado)</a></li>` : ''}
+        ${manualLinks.listagem ? `<li><a href="${escapeHtml(manualLinks.listagem)}" target="_blank" rel="noopener noreferrer">Listagem de alertas (portal legado)</a></li>` : ''}
         ${manualLinks.tecnovigilancia ? `<li><a href="${escapeHtml(manualLinks.tecnovigilancia)}" target="_blank" rel="noopener noreferrer">Página oficial de Tecnovigilância (gov.br)</a></li>` : ''}
       </ul></div>`
+    : '';
+
+
+  const alertsResult = data.alerts_result || {};
+  const alertsResultHtml = alertsResult && (alertsResult.source || alertsResult.confidence || Array.isArray(alertsResult.alert_ids))
+    ? `<p class="meta">Camada: <strong>${escapeHtml(alertsResult.source || 'n/d')}</strong> · Confiança: <strong>${escapeHtml(alertsResult.confidence || 'n/d')}</strong>${Array.isArray(alertsResult.alert_ids) && alertsResult.alert_ids.length ? ` · IDs: ${escapeHtml(alertsResult.alert_ids.join(', '))}` : ''}</p>`
     : '';
 
   let alertsHtml = '';
@@ -75,12 +81,12 @@ function render(data) {
     alertsHtml = data.alerts.map(a => `
       <article class="alert-item">
         <h4>${escapeHtml(a.title || 'Alerta sem título')}</h4>
-        <div class="meta">${escapeHtml(a.date || 'Data não informada')}${a.number ? ` • Alerta ${escapeHtml(a.number)}` : ''}</div>
+        <div class="meta">${escapeHtml(a.date || 'Data não informada')}${a.id ? ` • Alerta ${escapeHtml(a.id)}` : ''}</div>
         <p>${escapeHtml(a.summary || '')}</p>
         <a href="${escapeHtml(a.link)}" target="_blank" rel="noopener noreferrer">Abrir fonte oficial</a>
       </article>
     `).join('');
-  } else if (status === 'no_results') {
+  } else if (status === 'no_alerts_found') {
     alertsHtml = '<p>Nenhum alerta de tecnovigilância encontrado para os termos consultados.</p>';
   } else {
     alertsHtml = '<p>A consulta automática de alertas não foi conclusiva. Use os links oficiais abaixo para validação manual.</p>';
@@ -106,6 +112,7 @@ function render(data) {
       <h2>Alertas de tecnovigilância (${data.alerts_count || 0})</h2>
       ${renderStatusBadge(status)}
       ${warningHtml}
+      ${alertsResultHtml}
       ${alertsHtml}
       ${sourceHtml}
       ${manualLinksHtml}
