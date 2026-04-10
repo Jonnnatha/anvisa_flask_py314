@@ -62,11 +62,14 @@ function render(data) {
     : '';
 
   const manualLinks = data.alerts_manual_links || {};
-  const manualLinksHtml = (manualLinks.principal || manualLinks.listagem || manualLinks.tecnovigilancia)
+  const manualLinksHtml = (manualLinks.principal || manualLinks.listagem || manualLinks.tecnovigilancia || manualLinks.busca_portal || manualLinks.busca_govbr || manualLinks.sistec_historico)
     ? `<div class="manual-links"><p>Consulta manual recomendada:</p><ul>
         ${manualLinks.principal ? `<li><a href="${escapeHtml(manualLinks.principal)}" target="_blank" rel="noopener noreferrer">Portal de alertas (legado)</a></li>` : ''}
         ${manualLinks.listagem ? `<li><a href="${escapeHtml(manualLinks.listagem)}" target="_blank" rel="noopener noreferrer">Listagem de alertas (portal legado)</a></li>` : ''}
         ${manualLinks.tecnovigilancia ? `<li><a href="${escapeHtml(manualLinks.tecnovigilancia)}" target="_blank" rel="noopener noreferrer">Página oficial de Tecnovigilância (gov.br)</a></li>` : ''}
+        ${manualLinks.busca_portal ? `<li><a href="${escapeHtml(manualLinks.busca_portal)}" target="_blank" rel="noopener noreferrer">Busca avançada de alertas (legado)</a></li>` : ''}
+        ${manualLinks.busca_govbr ? `<li><a href="${escapeHtml(manualLinks.busca_govbr)}" target="_blank" rel="noopener noreferrer">Busca no portal gov.br (ANVISA)</a></li>` : ''}
+        ${manualLinks.sistec_historico ? `<li><a href="${escapeHtml(manualLinks.sistec_historico)}" target="_blank" rel="noopener noreferrer">Histórico SISTEC de alertas</a></li>` : ''}
       </ul></div>`
     : '';
 
@@ -80,14 +83,23 @@ function render(data) {
   if (data.alerts && data.alerts.length) {
     alertsHtml = data.alerts.map(a => `
       <article class="alert-item">
-        <h4>${escapeHtml(a.title || 'Alerta sem título')}</h4>
-        <div class="meta">${escapeHtml(a.date || 'Data não informada')}${a.id ? ` • Alerta ${escapeHtml(a.id)}` : ''}</div>
-        <p>${escapeHtml(a.summary || '')}</p>
-        <a href="${escapeHtml(a.link)}" target="_blank" rel="noopener noreferrer">Abrir fonte oficial</a>
+        <h4>${escapeHtml(a.title || a.titulo || 'Alerta sem título')}</h4>
+        <div class="meta">
+          ${escapeHtml(a.date || a.data || 'Data não informada')}
+          ${(a.numero_alerta || a.id) ? ` • Nº ${escapeHtml(a.numero_alerta || a.id)}` : ''}
+          ${a.origem_da_descoberta ? ` • Origem: ${escapeHtml(a.origem_da_descoberta)}` : ''}
+        </div>
+        ${a.summary ? `<p>${escapeHtml(a.summary)}</p>` : ''}
+        <div class="meta">
+          ${a.link_oficial || a.link ? `<a href="${escapeHtml(a.link_oficial || a.link)}" target="_blank" rel="noopener noreferrer">Abrir link oficial</a>` : '<span>Link oficial não confirmado</span>'}
+          ${a.link_pesquisa_manual ? ` · <a href="${escapeHtml(a.link_pesquisa_manual)}" target="_blank" rel="noopener noreferrer">Pesquisar manualmente este alerta</a>` : ''}
+        </div>
       </article>
     `).join('');
   } else if (status === 'no_alerts_found') {
     alertsHtml = '<p>Nenhum alerta de tecnovigilância encontrado para os termos consultados.</p>';
+  } else if (status === 'blocked_source') {
+    alertsHtml = '<p>As fontes automáticas bloquearam parte da consulta. Confira abaixo os links de pesquisa manual recomendada.</p>';
   } else {
     alertsHtml = '<p>A consulta automática de alertas não foi conclusiva. Use os links oficiais abaixo para validação manual.</p>';
   }
