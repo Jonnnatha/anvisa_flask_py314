@@ -31,6 +31,7 @@ function renderStatusBadge(status) {
   const labelByStatus = {
     alerts_found: 'Alertas localizados',
     no_alerts_found: 'Sem alertas encontrados',
+    anti_bot_block: 'Fonte oficial bloqueou automação',
     blocked_source: 'Fonte bloqueada',
     partial_result: 'Resultado parcial útil',
     manual_validation_required: 'Validação manual necessária',
@@ -48,7 +49,7 @@ function render(data) {
 
   const fullAlerts = alerts.filter(a => Boolean(a.link_oficial || a.link));
   const partialAlerts = alerts.filter(a => !a.link_oficial && !a.link);
-  const blockedWithoutId = status === 'blocked_source' && alerts.length === 0;
+  const blockedWithoutId = (status === 'blocked_source' || status === 'anti_bot_block') && alerts.length === 0;
 
   const warningHtml = data.alerts_warning
     ? `<div class="feedback warning">${escapeHtml(data.alerts_warning)}</div>`
@@ -117,8 +118,8 @@ function render(data) {
       const metodo = a.metodo || '';
       const origemTipo = metodo.startsWith('official_sources.')
         ? 'fonte oficial'
-        : (metodo.startsWith('alternative_search.')
-          ? 'busca indireta'
+        : (metodo.startsWith('indexed_search.')
+          ? 'resultado vindo de busca indexada'
           : (metodo.startsWith('web_search.') ? 'busca web/Google' : 'camada complementar'));
       return `
         <article class="alert-item ${isPartial ? 'alert-item-partial' : 'alert-item-full'}">
@@ -141,8 +142,8 @@ function render(data) {
     }).join('');
   } else if (status === 'no_alerts_found') {
     alertsHtml = '<p>Nenhum alerta de tecnovigilância encontrado para os termos consultados.</p>';
-  } else if (status === 'blocked_source') {
-    alertsHtml = '<p>Fontes oficiais bloquearam a consulta automática nesta execução. O sistema tentou estratégias indiretas e mantém links de contingência abaixo.</p>';
+  } else if (status === 'blocked_source' || status === 'anti_bot_block') {
+    alertsHtml = '<p>Fonte oficial bloqueou automação. A busca indireta tentou identificar alertas e sinais públicos; veja resultados parciais e links de pesquisa manual abaixo.</p>';
   } else {
     alertsHtml = '<p>A consulta automática não foi conclusiva, mas as estratégias e links de validação estão disponíveis abaixo.</p>';
   }

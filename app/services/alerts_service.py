@@ -47,6 +47,7 @@ LEGACY_ALERTS_LIST_URL = ALERTS_PAGE_URL
 STATUS_ALERTS_FOUND = 'alerts_found'
 STATUS_NO_ALERTS_FOUND = 'no_alerts_found'
 STATUS_BLOCKED_SOURCE = 'blocked_source'
+STATUS_ANTI_BOT_BLOCK = 'anti_bot_block'
 STATUS_PARTIAL_RESULT = 'partial_result'
 STATUS_MANUAL_VALIDATION_REQUIRED = 'manual_validation_required'
 STATUS_SIGNALS_FOUND = 'signals_found'
@@ -98,7 +99,11 @@ def _extract_registrations(text: str) -> set[str]:
 
 
 def _classify_http_status(status_code: int) -> str:
-    return STATUS_BLOCKED_SOURCE if status_code in {401, 403} else STATUS_MANUAL_VALIDATION_REQUIRED
+    if status_code == 403:
+        return STATUS_ANTI_BOT_BLOCK
+    if status_code == 401:
+        return STATUS_BLOCKED_SOURCE
+    return STATUS_MANUAL_VALIDATION_REQUIRED
 
 
 def _classify_request_failure(exc: Exception) -> str:
@@ -111,6 +116,7 @@ def _classify_request_failure(exc: Exception) -> str:
 
 def _build_warning(status: str, details: str | None = None) -> str:
     base = {
+        STATUS_ANTI_BOT_BLOCK: 'Fonte oficial bloqueou automação (anti-bot / HTTP 403).',
         STATUS_BLOCKED_SOURCE: 'Fonte bloqueou consulta automática (ex.: 403/anti-bot).',
         STATUS_PARTIAL_RESULT: 'Resultado parcial: números identificados sem confirmação completa do alerta.',
         STATUS_MANUAL_VALIDATION_REQUIRED: 'Validação manual recomendada por limitação da fonte ou parsing.',
@@ -358,7 +364,7 @@ def _search_in_index(registro: str, terms: list[str], entries: list[dict[str, An
                 'date': entry.get('date'),
                 'link_oficial': entry.get('link'),
                 'origem_da_descoberta': 'official_sources_index_cache',
-            }, 'official_sources_index_cache', 'medium', registro, 'alternative_search.official_index_cache_lookup'))
+            }, 'official_sources_index_cache', 'medium', registro, 'indexed_search.official_index_cache_lookup'))
     return results
 
 
@@ -377,6 +383,10 @@ def _dedupe_alerts(alerts: list[dict[str, Any]]) -> list[dict[str, Any]]:
 def _record_attempt(attempts: list[dict[str, Any]], layer: str, name: str, url: str, status: str, details: str | None, count: int = 0) -> None:
     attempts.append({'layer': layer, 'name': name, 'url': url, 'status': status, 'details': details, 'alerts_count': count})
     logger.info('alerts_strategy layer=%s source=%s status=%s alerts=%s details=%s', layer, name, status, count, details)
+
+
+def _is_blocked_status(status: str) -> bool:
+    return status in {STATUS_BLOCKED_SOURCE, STATUS_ANTI_BOT_BLOCK}
 
 
 def _final_payload(alerts: list[dict[str, Any]], source: str, confidence: str) -> dict[str, Any]:
@@ -525,7 +535,14 @@ def _run_web_discovery(
 
 
 def find_alerts_by_registration(registro: str, product: dict[str, Any] | None = None) -> dict[str, Any]:
-    search_terms = [registro, (product or {}).get('fabricante') or '', (product or {}).get('nome_produto') or '', (product or {}).get('detentor_registro') or '']
+    search_terms = [
+        registro,
+        (product or {}).get('nome_produto') or '',
+        (product or {}).get('marca') or '',
+        (product or {}).get('modelo') or '',
+        (product or {}).get('fabricante') or '',
+        (product or {}).get('detentor_registro') or '',
+    ]
     search_terms = [t.strip() for t in search_terms if t and t.strip()]
     normalized_terms = _normalize_terms(search_terms)
     manual_links = _manual_links(registro)
@@ -537,6 +554,7 @@ def find_alerts_by_registration(registro: str, product: dict[str, Any] | None = 
     error_details: list[str] = []
 
     official_statuses: list[str] = []
+    blocked_urls: set[str] = set()
 
     # Camada 1: fontes oficiais diretas.
     try:
@@ -547,6 +565,8 @@ def find_alerts_by_registration(registro: str, product: dict[str, Any] | None = 
             details = f'HTTP {r.status_code}'
             _record_attempt(attempts, 'official_sources', 'anvisa_legado_tagsName', ALERTS_PAGE_URL, st, details)
             error_details.append(f'anvisa_legado_tagsName: {details}')
+            if _is_blocked_status(st):
+                blocked_urls.add(ALERTS_PAGE_URL)
         else:
             items, _ = _parse_listing_alerts(r.text, ALERTS_PAGE_URL, normalized_terms, 'official_tags_listing', registro, 'official_sources.anvisa_legado_tagsName')
             all_alerts.extend(items)
@@ -563,6 +583,17 @@ def find_alerts_by_registration(registro: str, product: dict[str, Any] | None = 
     try:
         url = LEGACY_ALERTS_LIST_URL
         for _ in range(MAX_LISTING_PAGES):
+            if url in blocked_urls:
+                _record_attempt(
+                    attempts,
+                    'official_sources',
+                    'anvisa_legado_listagem',
+                    url,
+                    STATUS_ANTI_BOT_BLOCK,
+                    'rota bloqueada anteriormente; repetição evitada',
+                    len(listing_alerts),
+                )
+                break
             r = session.get(url, timeout=REQUEST_TIMEOUT, verify=SSL_VERIFY, allow_redirects=True)
             if r.status_code >= 400:
                 st = _classify_http_status(r.status_code)
@@ -570,6 +601,8 @@ def find_alerts_by_registration(registro: str, product: dict[str, Any] | None = 
                 details = f'HTTP {r.status_code}'
                 _record_attempt(attempts, 'official_sources', 'anvisa_legado_listagem', url, st, details, len(listing_alerts))
                 error_details.append(f'anvisa_legado_listagem: {details}')
+                if _is_blocked_status(st):
+                    blocked_urls.add(url)
                 break
 
             items, next_url = _parse_listing_alerts(r.text, url, normalized_terms, 'official_listagem_scan', registro, 'official_sources.anvisa_legado_listagem')
@@ -594,25 +627,30 @@ def find_alerts_by_registration(registro: str, product: dict[str, Any] | None = 
         ('anvisa_legado_busca_avancada', LEGACY_ADVANCED_SEARCH_URL, {'keywords': registro, 'dataInicial': '', 'dataFinal': '', 'categoryIds': '34506'}),
         ('govbr_search', GOVBR_SEARCH_URL, {'SearchableText': f'alerta tecnovigilancia {registro}'}),
     ]:
+        if url in blocked_urls:
+            _record_attempt(attempts, 'indexed_search', name, url, STATUS_ANTI_BOT_BLOCK, 'rota bloqueada anteriormente; repetição evitada')
+            continue
         try:
             r = session.get(url, params=params, timeout=REQUEST_TIMEOUT, verify=SSL_VERIFY, allow_redirects=True)
             if r.status_code >= 400:
                 st = _classify_http_status(r.status_code)
                 details = f'HTTP {r.status_code}'
-                _record_attempt(attempts, 'alternative_search', name, url, st, details)
+                _record_attempt(attempts, 'indexed_search', name, url, st, details)
                 error_details.append(f'{name}: {details}')
+                if _is_blocked_status(st):
+                    blocked_urls.add(url)
                 partial_pool.extend(_extract_alert_candidates_from_text(r.text, f'{name}_text_probe', registro, search_terms, f'partial_identifier.{name}_text_probe'))
                 continue
 
-            items, _ = _parse_listing_alerts(r.text, r.url, normalized_terms, f'{name}_listing', registro, f'alternative_search.{name}')
+            items, _ = _parse_listing_alerts(r.text, r.url, normalized_terms, f'{name}_listing', registro, f'indexed_search.{name}')
             partial = _extract_alert_candidates_from_text(r.text, f'{name}_text_probe', registro, search_terms, f'partial_identifier.{name}_text_probe')
             all_alerts.extend(items)
             partial_pool.extend(partial)
-            _record_attempt(attempts, 'alternative_search', name, url, 'ok', None, len(items) + len(partial))
+            _record_attempt(attempts, 'indexed_search', name, url, 'ok', None, len(items) + len(partial))
         except Exception as exc:
             st = _classify_request_failure(exc)
             details = str(exc)
-            _record_attempt(attempts, 'alternative_search', name, url, st, details)
+            _record_attempt(attempts, 'indexed_search', name, url, st, details)
             error_details.append(f'{name} exception: {details}')
 
     cache = _load_cached_index()
@@ -624,12 +662,12 @@ def find_alerts_by_registration(registro: str, product: dict[str, Any] | None = 
         else:
             detail = 'sem_dados_oficiais_para_cache'
         cache = {'entries': entries}
-        _record_attempt(attempts, 'alternative_search', 'official_index_cache_refresh', str(INDEX_CACHE_FILE), 'ok', detail, len(entries))
+        _record_attempt(attempts, 'indexed_search', 'official_index_cache_refresh', str(INDEX_CACHE_FILE), 'ok', detail, len(entries))
 
     indexed = _search_in_index(registro, search_terms, cache.get('entries', []))
     if indexed:
         all_alerts.extend(indexed)
-    _record_attempt(attempts, 'alternative_search', 'official_index_cache_lookup', str(INDEX_CACHE_FILE), 'ok', None, len(indexed))
+    _record_attempt(attempts, 'indexed_search', 'official_index_cache_lookup', str(INDEX_CACHE_FILE), 'ok', None, len(indexed))
 
     # Camada 3: identificação parcial de números.
     partial_numbers = {str(a.get('numero_alerta')) for a in partial_pool if a.get('numero_alerta')}
@@ -678,16 +716,18 @@ def find_alerts_by_registration(registro: str, product: dict[str, Any] | None = 
             'sources_checked': attempts,
             'complaints_or_signals': complaint_signals,
             'search_status': {
-                'overall': status,
-                'official_blocked': bool(official_statuses) and all(s == STATUS_BLOCKED_SOURCE for s in official_statuses),
-                'web_search_used': True,
-                'official_alerts_found': has_official,
-                'web_signals_found': len(complaint_signals) > 0,
-            },
-        }
+            'overall': status,
+            'official_blocked': bool(official_statuses) and all(_is_blocked_status(s) for s in official_statuses),
+            'anti_bot_block_detected': STATUS_ANTI_BOT_BLOCK in official_statuses,
+            'web_search_used': True,
+            'official_alerts_found': has_official,
+            'web_signals_found': len(complaint_signals) > 0,
+            'layers_attempted': ['official_sources', 'indexed_search', 'web_search', 'partial_identifier', 'external_fallback'],
+        },
+    }
 
-    if official_statuses and all(s == STATUS_BLOCKED_SOURCE for s in official_statuses):
-        status = STATUS_BLOCKED_SOURCE
+    if official_statuses and all(_is_blocked_status(s) for s in official_statuses):
+        status = STATUS_ANTI_BOT_BLOCK if STATUS_ANTI_BOT_BLOCK in official_statuses else STATUS_BLOCKED_SOURCE
     elif error_details:
         status = STATUS_MANUAL_VALIDATION_REQUIRED
     else:
@@ -709,9 +749,11 @@ def find_alerts_by_registration(registro: str, product: dict[str, Any] | None = 
         'complaints_or_signals': complaint_signals,
         'search_status': {
             'overall': status,
-            'official_blocked': bool(official_statuses) and all(s == STATUS_BLOCKED_SOURCE for s in official_statuses),
+            'official_blocked': bool(official_statuses) and all(_is_blocked_status(s) for s in official_statuses),
+            'anti_bot_block_detected': STATUS_ANTI_BOT_BLOCK in official_statuses,
             'web_search_used': True,
             'official_alerts_found': False,
             'web_signals_found': len(complaint_signals) > 0,
+            'layers_attempted': ['official_sources', 'indexed_search', 'web_search', 'partial_identifier', 'external_fallback'],
         },
     }
