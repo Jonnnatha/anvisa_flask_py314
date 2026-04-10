@@ -31,6 +31,10 @@ def search_by_registration(value: str) -> dict[str, Any]:
             'alerts': [],
             'alerts_warning': None,
             'alerts_manual_url': f'{ALERTS_PAGE_URL}?tagsName={registro}',
+            'complaints_or_signals': [],
+            'search_status': {'overall': 'product_not_found', 'web_search_used': False},
+            'sources_checked': [],
+            'warnings': [],
             'message': 'Registro não encontrado na base consultada da Anvisa.',
         }
 
@@ -56,8 +60,12 @@ def search_by_registration(value: str) -> dict[str, Any]:
         'alerts_warning': alert_result.get('warning'),
         'alerts_sources': alert_result.get('sources', []),
         'alerts_strategy_log': alert_result.get('sources', []),
+        'sources_checked': alert_result.get('sources_checked', alert_result.get('sources', [])),
         'alerts_reference_links': alert_result.get('reference_links', []),
         'alerts_manual_url': alert_result.get('manual_url'),
         'alerts_manual_links': alert_result.get('manual_links', {}),
+        'complaints_or_signals': alert_result.get('complaints_or_signals', []),
+        'search_status': alert_result.get('search_status', {'overall': alert_result.get('status')}),
+        'warnings': alert_result.get('warnings', []),
         'message': 'Registro encontrado.' if not alerts else 'Registro encontrado e alertas localizados.',
     }

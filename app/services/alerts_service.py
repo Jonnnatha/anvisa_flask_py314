@@ -5,7 +5,7 @@ import logging
 import re
 from datetime import datetime, timedelta, timezone
 from typing import Any
-from urllib.parse import quote_plus, urljoin
+from urllib.parse import parse_qs, quote_plus, urljoin, urlparse
 
 import requests
 from bs4 import BeautifulSoup
@@ -49,10 +49,13 @@ STATUS_NO_ALERTS_FOUND = 'no_alerts_found'
 STATUS_BLOCKED_SOURCE = 'blocked_source'
 STATUS_PARTIAL_RESULT = 'partial_result'
 STATUS_MANUAL_VALIDATION_REQUIRED = 'manual_validation_required'
+STATUS_SIGNALS_FOUND = 'signals_found'
 
 INDEX_CACHE_FILE = DATA_DIR / 'alerts_index_cache.json'
 INDEX_CACHE_TTL_HOURS = 12
 MAX_LISTING_PAGES = 5
+MAX_WEB_RESULTS_PER_QUERY = 8
+MAX_COMPLAINT_SIGNALS = 12
 
 BROWSER_HEADERS = {
     'User-Agent': USER_AGENT,
@@ -112,6 +115,7 @@ def _build_warning(status: str, details: str | None = None) -> str:
         STATUS_PARTIAL_RESULT: 'Resultado parcial: números identificados sem confirmação completa do alerta.',
         STATUS_MANUAL_VALIDATION_REQUIRED: 'Validação manual recomendada por limitação da fonte ou parsing.',
         STATUS_NO_ALERTS_FOUND: 'Nenhum alerta localizado nas camadas consultadas.',
+        STATUS_SIGNALS_FOUND: 'Sem alerta oficial confirmado, mas há sinais públicos relevantes na web.',
     }.get(status, 'Falha na consulta automática de alertas.')
     return f'{base} Detalhes técnicos: {details}' if details else base
 
@@ -153,11 +157,81 @@ def _enrich_alert(alert: dict[str, Any], default_origin: str, confidence: str, r
         'summary': alert.get('summary'),
         'link': alert.get('link') or alert.get('link_oficial'),
         'link_oficial': alert.get('link_oficial') or alert.get('link'),
+        'link_indexado': alert.get('link_indexado'),
         'link_pesquisa_manual': manual,
         'origem_da_descoberta': alert.get('origem_da_descoberta') or default_origin,
         'nivel_confianca': alert.get('nivel_confianca') or confidence,
         'metodo': alert.get('metodo') or metodo,
         'matched_terms': alert.get('matched_terms', []),
+    }
+
+
+def _parse_google_result_links(html: str) -> list[dict[str, str]]:
+    soup = BeautifulSoup(html, 'html.parser')
+    links: list[dict[str, str]] = []
+    seen: set[str] = set()
+
+    for anchor in soup.select('a[href^="/url?q="]'):
+        href = anchor.get('href') or ''
+        parsed = urlparse(href)
+        target = parse_qs(parsed.query).get('q', [None])[0]
+        if not target or target in seen:
+            continue
+        title = anchor.get_text(' ', strip=True)
+        if not title or 'google' in target.lower():
+            continue
+        seen.add(target)
+        links.append({'title': title[:220], 'link': target})
+        if len(links) >= MAX_WEB_RESULTS_PER_QUERY:
+            break
+    return links
+
+
+def _classify_signal_type(title: str, snippet: str) -> str:
+    content = f'{title} {snippet}'.lower()
+    if 'recall' in content:
+        return 'recall'
+    if 'ação de campo' in content:
+        return 'ação de campo'
+    if 'queixa técnica' in content:
+        return 'queixa técnica'
+    if 'notifica' in content:
+        return 'notificação'
+    if 'alerta' in content:
+        return 'alerta'
+    if 'reclama' in content:
+        return 'reclamação'
+    return 'ocorrência'
+
+
+def _extract_domain(url: str | None) -> str:
+    if not url:
+        return 'desconhecida'
+    return (urlparse(url).netloc or 'desconhecida').replace('www.', '')
+
+
+def _confidence_for_signal(url: str, title: str, snippet: str) -> str:
+    domain = _extract_domain(url)
+    content = f'{title} {snippet}'.lower()
+    if 'gov.br' in domain and 'anvisa' in (url or '').lower():
+        return 'high'
+    if any(term in content for term in ('recall', 'alerta', 'ação de campo', 'queixa técnica')):
+        return 'medium'
+    return 'low'
+
+
+def _build_complaint_signal(result: dict[str, Any], origin: str) -> dict[str, Any]:
+    title = result.get('title') or 'Resultado encontrado na web'
+    snippet = result.get('summary') or ''
+    link = result.get('link')
+    return {
+        'titulo': title,
+        'fonte': _extract_domain(link),
+        'tipo': _classify_signal_type(title, snippet),
+        'link': link,
+        'resumo': snippet[:400] if snippet else None,
+        'origem_da_descoberta': origin,
+        'nivel_confianca': _confidence_for_signal(link or '', title, snippet),
     }
 
 
@@ -352,6 +426,104 @@ def _run_external_fallback(session: requests.Session, registro: str, attempts: l
     return external_alerts
 
 
+def _run_web_discovery(
+    session: requests.Session,
+    registro: str,
+    search_terms: list[str],
+    attempts: list[dict[str, Any]],
+    error_details: list[str],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """
+    Camada complementar de busca web/Google.
+    Nunca substitui fonte oficial; apenas enriquece com sinais públicos e links indexados.
+    """
+    terms = [t for t in search_terms if t]
+    product_terms = [quote_plus(term) for term in terms[1:4]]
+    query_chunks = [
+        f'"{registro}" alerta anvisa',
+        f'"registro anvisa {registro}" recall',
+        f'"{registro}" queixa técnica',
+        f'"{registro}" ação de campo',
+    ]
+    if product_terms:
+        query_chunks.append(f'"{terms[0]}" {" ".join(terms[1:3])} reclamação')
+
+    web_alerts: list[dict[str, Any]] = []
+    complaint_signals: list[dict[str, Any]] = []
+    seen_links: set[str] = set()
+
+    for query in query_chunks:
+        google_url = 'https://www.google.com/search'
+        govbr_url = GOVBR_SEARCH_URL
+
+        for source_name, base_url, params in [
+            ('google_search_web', google_url, {'q': query, 'hl': 'pt-BR', 'num': str(MAX_WEB_RESULTS_PER_QUERY)}),
+            ('govbr_search_indexed', govbr_url, {'SearchableText': query}),
+        ]:
+            try:
+                resp = session.get(base_url, params=params, timeout=REQUEST_TIMEOUT, verify=SSL_VERIFY, allow_redirects=True)
+                if resp.status_code >= 400:
+                    st = _classify_http_status(resp.status_code)
+                    details = f'HTTP {resp.status_code}'
+                    _record_attempt(attempts, 'web_search', source_name, base_url, st, details)
+                    error_details.append(f'{source_name}: {details}')
+                    continue
+
+                if source_name == 'google_search_web':
+                    results = _parse_google_result_links(resp.text)
+                else:
+                    results, _ = _parse_listing_alerts(resp.text, resp.url, [], source_name, registro, f'web_search.{source_name}')
+
+                hits = 0
+                for item in results:
+                    link = item.get('link') or item.get('link_oficial')
+                    title = item.get('title') or item.get('titulo') or 'Resultado indexado'
+                    if not link or link in seen_links:
+                        continue
+                    seen_links.add(link)
+                    summary = item.get('summary') or title
+                    combined = f'{title} {summary}'
+                    if registro not in combined and not any(term.lower() in combined.lower() for term in terms[1:]):
+                        continue
+
+                    origin = f'web_search.{source_name}'
+                    alert_number = _extract_alert_number(combined)
+                    if alert_number or ('anvisa' in link.lower() and 'alerta' in combined.lower()):
+                        web_alerts.append(_enrich_alert({
+                            'numero_alerta': alert_number,
+                            'titulo': title,
+                            'data': _parse_date(combined),
+                            'summary': summary[:400],
+                            'link_indexado': link,
+                            'link_oficial': link if 'gov.br/anvisa' in link else None,
+                            'link_pesquisa_manual': _build_manual_search_link(alert_number, registro),
+                            'origem_da_descoberta': origin,
+                            'nivel_confianca': _confidence_for_signal(link, title, summary),
+                        }, origin, _confidence_for_signal(link, title, summary), registro, origin))
+                        hits += 1
+
+                    complaint_signals.append(_build_complaint_signal({
+                        'title': title,
+                        'summary': summary,
+                        'link': link,
+                    }, origin))
+                    hits += 1
+                    if len(complaint_signals) >= MAX_COMPLAINT_SIGNALS:
+                        break
+
+                _record_attempt(attempts, 'web_search', source_name, base_url, 'ok', f'query={query}', hits)
+            except Exception as exc:
+                st = _classify_request_failure(exc)
+                details = str(exc)
+                _record_attempt(attempts, 'web_search', source_name, base_url, st, details)
+                error_details.append(f'{source_name} exception: {details}')
+
+        if len(complaint_signals) >= MAX_COMPLAINT_SIGNALS:
+            break
+
+    return _dedupe_alerts(web_alerts), complaint_signals[:MAX_COMPLAINT_SIGNALS]
+
+
 def find_alerts_by_registration(registro: str, product: dict[str, Any] | None = None) -> dict[str, Any]:
     search_terms = [registro, (product or {}).get('fabricante') or '', (product or {}).get('nome_produto') or '', (product or {}).get('detentor_registro') or '']
     search_terms = [t.strip() for t in search_terms if t and t.strip()]
@@ -478,21 +650,40 @@ def find_alerts_by_registration(registro: str, product: dict[str, Any] | None = 
     # Camada 4: fallback externo opcional/configurável.
     external_alerts = _run_external_fallback(session, registro, attempts, error_details)
 
-    # Camada 5: links de validação manual sempre entregues no payload final.
-    merged = _dedupe_alerts(all_alerts + partial_from_numbers + external_alerts)
+    # Camada 5: busca web/Google complementar para sinais públicos.
+    web_alerts, complaint_signals = _run_web_discovery(session, registro, search_terms, attempts, error_details)
+
+    # Camada 6: links de validação manual sempre entregues no payload final.
+    merged = _dedupe_alerts(all_alerts + partial_from_numbers + external_alerts + web_alerts)
+    warnings: list[str] = []
     if merged:
         has_official = any(a.get('link_oficial') and 'pythonanywhere.com' not in (a.get('link_oficial') or '') for a in merged)
         has_external = any((a.get('metodo') or '').startswith('external_fallback.') for a in merged)
-        status = STATUS_ALERTS_FOUND if has_official else STATUS_PARTIAL_RESULT
+        has_web = any((a.get('metodo') or '').startswith('web_search.') for a in merged)
+        status = STATUS_ALERTS_FOUND if has_official else (STATUS_PARTIAL_RESULT if merged else STATUS_SIGNALS_FOUND)
         confidence = 'high' if has_official else ('medium' if has_external else 'low')
         payload = _final_payload(merged, 'layered_alert_discovery', confidence)
+        if not has_official and has_web:
+            warnings.append('Resultados de busca web/Google são indícios públicos e não substituem validação oficial da ANVISA.')
+        if error_details:
+            warnings.append(_build_warning(STATUS_PARTIAL_RESULT, '; '.join(error_details[:4])))
         return {
             **payload,
             'status': status,
-            'warning': _build_warning(status, '; '.join(error_details[:4])) if status == STATUS_PARTIAL_RESULT else None,
+            'warning': warnings[0] if warnings else None,
+            'warnings': warnings,
             'manual_url': manual_links['principal'],
             'manual_links': manual_links,
             'sources': attempts,
+            'sources_checked': attempts,
+            'complaints_or_signals': complaint_signals,
+            'search_status': {
+                'overall': status,
+                'official_blocked': bool(official_statuses) and all(s == STATUS_BLOCKED_SOURCE for s in official_statuses),
+                'web_search_used': True,
+                'official_alerts_found': has_official,
+                'web_signals_found': len(complaint_signals) > 0,
+            },
         }
 
     if official_statuses and all(s == STATUS_BLOCKED_SOURCE for s in official_statuses):
@@ -500,13 +691,27 @@ def find_alerts_by_registration(registro: str, product: dict[str, Any] | None = 
     elif error_details:
         status = STATUS_MANUAL_VALIDATION_REQUIRED
     else:
-        status = STATUS_NO_ALERTS_FOUND
+        status = STATUS_SIGNALS_FOUND if complaint_signals else STATUS_NO_ALERTS_FOUND
 
+    if complaint_signals and status != STATUS_NO_ALERTS_FOUND:
+        warnings.append('Resultados de busca web/Google são indícios públicos e não substituem validação oficial da ANVISA.')
+    if status != STATUS_NO_ALERTS_FOUND:
+        warnings.append(_build_warning(status, '; '.join(error_details[:4])))
     return {
         **_final_payload([], 'layered_alert_discovery', 'low' if status != STATUS_NO_ALERTS_FOUND else 'medium'),
         'status': status,
-        'warning': _build_warning(status, '; '.join(error_details[:4])) if status != STATUS_NO_ALERTS_FOUND else None,
+        'warning': warnings[0] if warnings else None,
+        'warnings': warnings,
         'manual_url': manual_links['tecnovigilancia'],
         'manual_links': manual_links,
         'sources': attempts,
+        'sources_checked': attempts,
+        'complaints_or_signals': complaint_signals,
+        'search_status': {
+            'overall': status,
+            'official_blocked': bool(official_statuses) and all(s == STATUS_BLOCKED_SOURCE for s in official_statuses),
+            'web_search_used': True,
+            'official_alerts_found': False,
+            'web_signals_found': len(complaint_signals) > 0,
+        },
     }
