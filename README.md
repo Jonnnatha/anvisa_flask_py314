@@ -6,7 +6,8 @@ Sistema web para consulta por **número de registro ANVISA (11 dígitos)** com f
 
 1. Consulta dados do equipamento/produto na base pública da Anvisa.
 2. Tenta consultar alertas de tecnovigilância no portal antigo da Anvisa.
-3. Se a consulta automática de alertas falhar (SSL, 403, indisponibilidade), mantém a resposta do produto e mostra link de consulta manual.
+3. Se houver bloqueio anti-bot (HTTP 403), aplica fallback progressivo: busca indireta, extração parcial e espelho comunitário por registro.
+4. Mesmo em falha parcial, retorna os números de alerta identificados e links de pesquisa manual por alerta.
 
 ## Stack escolhida
 
@@ -105,5 +106,6 @@ python -m app
 - O portal de alertas pode bloquear acesso automatizado (403).
 - Alguns endpoints antigos podem falhar com SSL dependendo do ambiente local/rede.
 - Estrutura HTML do portal de alertas pode mudar, exigindo ajuste no parser.
+- Para reduzir indisponibilidade total, existe fallback de contingência para extração parcial de números de alerta.
 
 Por isso, a consulta de alertas foi isolada em `services/alerts_service.py` com fallback seguro para consulta manual.

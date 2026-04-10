@@ -25,6 +25,7 @@ LEGACY_ADVANCED_SEARCH_URL = (
 )
 GOVBR_SEARCH_URL = 'https://www.gov.br/anvisa/pt-br/search'
 SISTEC_ALERT_SEARCH_URL = 'http://www.anvisa.gov.br/sistec/alerta/consultaralerta.asp'
+COMMUNITY_REGISTRY_LOOKUP_URL = 'https://brunoroma.pythonanywhere.com/registro/{registro}'
 
 LEGACY_ALERTS_LIST_URL = ALERTS_PAGE_URL
 
@@ -118,6 +119,7 @@ def _manual_links(registro: str) -> dict[str, str]:
         ),
         'busca_govbr': f'{GOVBR_SEARCH_URL}?SearchableText={search_query}',
         'sistec_historico': SISTEC_ALERT_SEARCH_URL,
+        'espelho_comunitario': COMMUNITY_REGISTRY_LOOKUP_URL.format(registro=registro),
     }
 
 
@@ -290,6 +292,69 @@ def _extract_alert_candidates_from_text(
     if not candidates:
         return []
     return candidates
+
+
+def _extract_alert_numbers_from_payload(payload: str) -> list[str]:
+    """
+    Extrai números de alerta de respostas livres (texto/HTML/JSON) sem depender
+    de estrutura específica da página.
+    """
+    numbers: list[str] = []
+    seen: set[str] = set()
+    for number in re.findall(r'\b\d{3,6}\b', payload or ''):
+        if number in seen:
+            continue
+        seen.add(number)
+        numbers.append(number)
+    return numbers
+
+
+def _build_partial_alert_from_number(number: str, origin: str) -> dict[str, Any]:
+    query = quote_plus(f'alerta {number} anvisa')
+    return {
+        'numero_alerta': number,
+        'id': number,
+        'title': f'Alerta {number} (identificação parcial)',
+        'titulo': None,
+        'date': None,
+        'data': None,
+        'summary': None,
+        'link': None,
+        'link_oficial': None,
+        'link_pesquisa_manual': f'{GOVBR_SEARCH_URL}?SearchableText={query}',
+        'origem_da_descoberta': origin,
+        'matched_terms': [],
+    }
+
+
+def _layer_community_registry_lookup(
+    session: requests.Session,
+    registro: str,
+) -> tuple[list[dict[str, Any]], str | None, str | None]:
+    """
+    Camada de contingência para bloquear cenário "apenas 403".
+    Consulta um espelho público que, em alguns ambientes, consegue retornar ao
+    menos os números de alerta por registro.
+    """
+    endpoint = COMMUNITY_REGISTRY_LOOKUP_URL.format(registro=registro)
+    try:
+        response = session.get(
+            endpoint,
+            timeout=REQUEST_TIMEOUT,
+            verify=SSL_VERIFY,
+            allow_redirects=True,
+        )
+        if response.status_code >= 400:
+            return [], _classify_http_status(response.status_code), f'HTTP {response.status_code}'
+
+        raw = response.text
+        numbers = _extract_alert_numbers_from_payload(raw)
+        if not numbers:
+            return [], None, None
+        alerts = [_build_partial_alert_from_number(number, 'community_registry_lookup') for number in numbers]
+        return alerts, None, None
+    except Exception as exc:
+        return [], _classify_request_failure(exc), str(exc)
 
 
 def _layer_legacy_advanced_search(
@@ -496,6 +561,14 @@ def find_alerts_by_registration(registro: str, product: dict[str, Any] | None = 
         'details': govbr_details,
     })
 
+    community_alerts, community_status, community_details = _layer_community_registry_lookup(session, registro)
+    sources.append({
+        'name': 'community_registry_lookup',
+        'url': COMMUNITY_REGISTRY_LOOKUP_URL.format(registro=registro),
+        'status': 'ok' if community_status is None else community_status,
+        'details': community_details,
+    })
+
     indexed_entries = _load_cached_index()
     index_source = 'cache'
     if indexed_entries is None:
@@ -507,7 +580,9 @@ def find_alerts_by_registration(registro: str, product: dict[str, Any] | None = 
 
     textual_alerts = _layer_textual_search(listing_alerts, registro, search_terms)
     cached_alerts = _search_in_index(registro, search_terms, indexed_entries.get('entries', []))
-    merged_alerts = _dedupe_alerts(textual_alerts + cached_alerts + alt_alerts + govbr_partial_alerts)
+    merged_alerts = _dedupe_alerts(
+        textual_alerts + cached_alerts + alt_alerts + govbr_partial_alerts + community_alerts
+    )
 
     if merged_alerts:
         has_official_links = any(a.get('link') or a.get('link_oficial') for a in merged_alerts)
@@ -518,6 +593,8 @@ def find_alerts_by_registration(registro: str, product: dict[str, Any] | None = 
             source = 'legacy_advanced_fallback'
         if govbr_partial_alerts and not (textual_alerts or alt_alerts):
             source = 'govbr_search_partial'
+        if community_alerts and not (textual_alerts or alt_alerts or govbr_partial_alerts):
+            source = 'community_registry_partial'
         payload = _format_alerts_payload(merged_alerts, source, confidence)
         status = STATUS_ALERTS_FOUND if has_official_links else STATUS_PARTIAL_RESULT
         return {
@@ -549,7 +626,7 @@ def find_alerts_by_registration(registro: str, product: dict[str, Any] | None = 
             'sources': sources,
         }
 
-    if direct_status or listing_status or alt_status or govbr_status:
+    if direct_status or listing_status or alt_status or govbr_status or community_status:
         return {
             'count': 0,
             'alert_ids': [],
@@ -559,7 +636,7 @@ def find_alerts_by_registration(registro: str, product: dict[str, Any] | None = 
             'status': STATUS_MANUAL_VALIDATION_REQUIRED,
             'warning': _build_warning(
                 STATUS_MANUAL_VALIDATION_REQUIRED,
-                direct_details or listing_details or alt_details or govbr_details,
+                direct_details or listing_details or alt_details or govbr_details or community_details,
             ),
             'manual_url': manual_links['tecnovigilancia'],
             'manual_links': manual_links,
