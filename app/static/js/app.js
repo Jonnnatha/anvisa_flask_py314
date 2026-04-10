@@ -34,6 +34,8 @@ function renderStatusBadge(status) {
     blocked_source: 'Fonte bloqueada',
     partial_result: 'Resultado parcial útil',
     manual_validation_required: 'Validação manual necessária',
+    signals_found: 'Sinais públicos encontrados',
+    product_not_found: 'Registro não encontrado',
   };
   const label = labelByStatus[status] || status;
   return `<p class="meta">Status da busca de alertas: <strong>${escapeHtml(label)}</strong></p>`;
@@ -61,6 +63,7 @@ function render(data) {
     : '';
 
   const manualLinks = data.alerts_manual_links || {};
+  const warnings = Array.isArray(data.warnings) ? data.warnings : [];
   const manualLinksHtml = Object.values(manualLinks).some(Boolean)
     ? `<div class="manual-links"><p>Consulta manual recomendada:</p><ul>
         ${manualLinks.principal ? `<li><a href="${escapeHtml(manualLinks.principal)}" target="_blank" rel="noopener noreferrer">Portal de alertas (legado)</a></li>` : ''}
@@ -89,11 +92,34 @@ function render(data) {
     </p>
   `;
 
+  const complaints = Array.isArray(data.complaints_or_signals) ? data.complaints_or_signals : [];
+  const complaintsHtml = complaints.length
+    ? complaints.map(item => `
+      <article class="alert-item alert-item-partial">
+        <h4>${escapeHtml(item.titulo || 'Sinal público')}</h4>
+        <div class="meta">
+          Tipo: <strong>${escapeHtml(item.tipo || 'ocorrência')}</strong>
+          · Fonte: ${escapeHtml(item.fonte || 'web')}
+          ${item.nivel_confianca ? ` · Confiança: ${escapeHtml(item.nivel_confianca)}` : ''}
+          ${item.origem_da_descoberta ? ` · Origem: ${escapeHtml(item.origem_da_descoberta)}` : ''}
+        </div>
+        ${item.resumo ? `<p>${escapeHtml(item.resumo)}</p>` : ''}
+        ${item.link ? `<a href="${escapeHtml(item.link)}" target="_blank" rel="noopener noreferrer">Abrir referência web</a>` : ''}
+      </article>
+    `).join('')
+    : '<p>Nenhum sinal público adicional identificado na web nesta execução.</p>';
+
   let alertsHtml = '';
   if (alerts.length) {
     alertsHtml = alerts.map(a => {
       const isPartial = !a.link_oficial && !a.link;
       const numero = a.numero_alerta || a.id;
+      const metodo = a.metodo || '';
+      const origemTipo = metodo.startsWith('official_sources.')
+        ? 'fonte oficial'
+        : (metodo.startsWith('alternative_search.')
+          ? 'busca indireta'
+          : (metodo.startsWith('web_search.') ? 'busca web/Google' : 'camada complementar'));
       return `
         <article class="alert-item ${isPartial ? 'alert-item-partial' : 'alert-item-full'}">
           <h4>${escapeHtml(a.title || a.titulo || (numero ? `Alerta ${numero}` : 'Alerta'))}</h4>
@@ -102,6 +128,7 @@ function render(data) {
             ${numero ? ` • <strong>Nº ${escapeHtml(numero)}</strong>` : ''}
             ${a.origem_da_descoberta ? ` • Origem: ${escapeHtml(a.origem_da_descoberta)}` : ''}
             ${a.metodo ? ` • Método: ${escapeHtml(a.metodo)}` : ''}
+            • Tipo de origem: ${escapeHtml(origemTipo)}
             ${a.nivel_confianca ? ` • Confiança: ${escapeHtml(a.nivel_confianca)}` : ''}
           </div>
           ${a.summary ? `<p>${escapeHtml(a.summary)}</p>` : ''}
@@ -140,11 +167,17 @@ function render(data) {
       <h2>Alertas de tecnovigilância (${data.alerts_count || 0})</h2>
       ${renderStatusBadge(status)}
       ${warningHtml}
+      ${warnings.length > 1 ? `<ul>${warnings.slice(1).map(w => `<li>${escapeHtml(w)}</li>`).join('')}</ul>` : ''}
       ${discoverySummaryHtml}
       ${alertNumbersHtml}
       ${alertsHtml}
       ${sourceHtml}
       ${manualLinksHtml}
+    </div>
+    <div class="box">
+      <h2>Reclamações / sinais públicos relacionados (${complaints.length})</h2>
+      <p class="meta">Itens desta seção vêm de busca indireta/web (incluindo Google) e não representam validação oficial automática da ANVISA.</p>
+      ${complaintsHtml}
     </div>
   `;
   resultado.classList.remove('hidden');
