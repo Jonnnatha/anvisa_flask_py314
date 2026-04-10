@@ -21,3 +21,6 @@ USER_AGENT = os.getenv(
 # Em ambiente local alguns endpoints antigos da Anvisa falham em SSL.
 # Mantemos valor padrão False para não quebrar a experiência local.
 SSL_VERIFY = os.getenv('SSL_VERIFY', 'false').lower() in ('1', 'true', 'yes')
+
+ENABLE_EXTERNAL_ALERT_FALLBACK = os.getenv('ENABLE_EXTERNAL_ALERT_FALLBACK', 'true').lower() in ('1', 'true', 'yes')
+EXTERNAL_ALERT_LOOKUP_BASE_URL = os.getenv('EXTERNAL_ALERT_LOOKUP_BASE_URL', 'https://brunoroma.pythonanywhere.com')

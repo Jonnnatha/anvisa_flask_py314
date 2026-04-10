@@ -66,6 +66,7 @@ function render(data) {
         ${manualLinks.principal ? `<li><a href="${escapeHtml(manualLinks.principal)}" target="_blank" rel="noopener noreferrer">Portal de alertas (legado)</a></li>` : ''}
         ${manualLinks.listagem ? `<li><a href="${escapeHtml(manualLinks.listagem)}" target="_blank" rel="noopener noreferrer">Listagem de alertas (legado)</a></li>` : ''}
         ${manualLinks.tecnovigilancia ? `<li><a href="${escapeHtml(manualLinks.tecnovigilancia)}" target="_blank" rel="noopener noreferrer">Página oficial de Tecnovigilância</a></li>` : ''}
+        ${manualLinks.dados_abertos_tecnovigilancia ? `<li><a href="${escapeHtml(manualLinks.dados_abertos_tecnovigilancia)}" target="_blank" rel="noopener noreferrer">Dados abertos de Tecnovigilância</a></li>` : ''}
         ${manualLinks.busca_portal ? `<li><a href="${escapeHtml(manualLinks.busca_portal)}" target="_blank" rel="noopener noreferrer">Busca avançada legado</a></li>` : ''}
         ${manualLinks.busca_govbr ? `<li><a href="${escapeHtml(manualLinks.busca_govbr)}" target="_blank" rel="noopener noreferrer">Busca gov.br ANVISA</a></li>` : ''}
         ${manualLinks.sistec_historico ? `<li><a href="${escapeHtml(manualLinks.sistec_historico)}" target="_blank" rel="noopener noreferrer">Histórico SISTEC</a></li>` : ''}
@@ -100,11 +101,12 @@ function render(data) {
             ${escapeHtml(a.date || a.data || 'Data não informada')}
             ${numero ? ` • <strong>Nº ${escapeHtml(numero)}</strong>` : ''}
             ${a.origem_da_descoberta ? ` • Origem: ${escapeHtml(a.origem_da_descoberta)}` : ''}
+            ${a.metodo ? ` • Método: ${escapeHtml(a.metodo)}` : ''}
             ${a.nivel_confianca ? ` • Confiança: ${escapeHtml(a.nivel_confianca)}` : ''}
           </div>
           ${a.summary ? `<p>${escapeHtml(a.summary)}</p>` : ''}
           <div class="meta">
-            ${a.link_oficial || a.link ? `<a href="${escapeHtml(a.link_oficial || a.link)}" target="_blank" rel="noopener noreferrer">Abrir link oficial</a>` : '<span>Alerta parcial (sem link oficial confirmado)</span>'}
+            ${a.link_oficial || a.link ? `<a href="${escapeHtml(a.link_oficial || a.link)}" target="_blank" rel="noopener noreferrer">${(a.metodo || '').startsWith('external_fallback.') ? 'Abrir referência externa' : 'Abrir link oficial'}</a>` : '<span>Alerta parcial (sem link oficial confirmado)</span>'}
             ${a.link_pesquisa_manual ? ` · <a href="${escapeHtml(a.link_pesquisa_manual)}" target="_blank" rel="noopener noreferrer">Pesquisar este alerta</a>` : ''}
           </div>
         </article>
