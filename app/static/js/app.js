@@ -150,7 +150,8 @@ function render(data) {
 
   resultado.innerHTML = `
     <div class="box">
-      <h2>Dados do equipamento</h2>
+      <h2>Dados do produto (API oficial ANVISA)</h2>
+      <p class="meta">Fonte: <code>POST /consulta/saude</code> com filtro por número de registro.</p>
       <div class="grid">
         ${field('Registro ANVISA', product.registro_anvisa || data.registro_anvisa)}
         ${field('Nome do produto', product.nome_produto)}
@@ -166,6 +167,7 @@ function render(data) {
     </div>
     <div class="box">
       <h2>Alertas de tecnovigilância (${data.alerts_count || 0})</h2>
+      <p class="meta">Módulo independente da consulta de produto. Em indisponibilidade automática, use a consulta assistida abaixo.</p>
       ${renderStatusBadge(status)}
       ${warningHtml}
       ${warnings.length > 1 ? `<ul>${warnings.slice(1).map(w => `<li>${escapeHtml(w)}</li>`).join('')}</ul>` : ''}
@@ -195,7 +197,7 @@ form.addEventListener('submit', async (event) => {
     return;
   }
 
-  setFeedback('Consultando fontes da Anvisa com estratégias em camadas...', 'ok');
+  setFeedback('Consultando API oficial de produtos da Anvisa e camada separada de alertas...', 'ok');
 
   try {
     const response = await fetch(`/api/consultar?registro=${encodeURIComponent(registro)}`);

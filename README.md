@@ -4,40 +4,39 @@ Sistema web para consulta por **número de registro ANVISA (11 dígitos)** com f
 
 ## O que o sistema faz
 
-1. Consulta dados do equipamento/produto na base pública da Anvisa.
-2. Tenta consultar alertas de tecnovigilância no portal antigo da Anvisa.
-3. Se houver bloqueio anti-bot (HTTP 403), aplica fallback progressivo em 5 camadas: oficial, alternativa, identificação parcial, fallback externo opcional e validação manual.
-4. Mesmo em falha parcial, retorna números de alerta com metadados: `numero_alerta`, `origem_da_descoberta`, `nivel_confianca`, `metodo`, `link_pesquisa_manual` e `link_oficial` quando disponível.
+1. Consulta dados do produto de saúde via **API oficial da Anvisa** (`POST /consulta/saude`) usando `filter.numeroRegistro`.
+2. Mantém a consulta de alertas em **módulo isolado**, com estratégia de fallback/assistida quando há bloqueio das fontes (HTTP 403).
+3. Exibe no frontend, de forma separada, o resultado do produto (API oficial) e o status da busca de alertas.
+
+> Importante: a integração oficial implementada nesta refatoração cobre **consulta de produtos de saúde**. A camada de alertas continua independente e não assume API oficial para tecnovigilância sem evidência.
 
 ## Stack escolhida
 
-- **Backend:** Flask 3.1 (simples e estável)
-- **HTTP:** requests + retry
-- **Parse HTML:** BeautifulSoup4
+- **Backend:** Flask 3.1
+- **HTTP:** requests
+- **Parse HTML (alertas):** BeautifulSoup4
 - **Frontend:** HTML/CSS/JS puro
-
-Sem dependências pesadas (FastAPI/Pydantic/Rust build).
 
 ## Estrutura
 
 ```text
 app/
-  __init__.py              # factory create_app
-  __main__.py              # python -m app
-  app.py                   # compat shim (python app/app.py)
-  routes.py                # rotas web/API
+  __init__.py
+  __main__.py
+  app.py
+  routes.py
   core/
-    config.py              # configurações e env vars
+    config.py              # env vars + carregamento opcional de .env
   services/
-    http_client.py         # cliente HTTP com retry e SSL configurável
-    product_service.py     # busca/cache do CSV oficial e lookup por registro
-    alerts_service.py      # busca de alertas + fallback robusto
-    search_service.py      # consolidação produto + alertas
+    product_service.py     # integração API oficial de produto
+    alerts_service.py      # consulta de alertas isolada + fallback assistido
+    search_service.py      # orquestra produto + alertas mantendo separação lógica
   templates/
     index.html
   static/
     css/style.css
     js/app.js
+.env.example               # variáveis para API oficial
 ```
 
 ## Requisitos
@@ -45,7 +44,7 @@ app/
 - Python 3.14
 - pip
 
-## Como rodar (VS Code / terminal)
+## Como rodar
 
 ### Linux/macOS
 
@@ -54,6 +53,8 @@ python -m venv .venv
 source .venv/bin/activate
 python -m pip install --upgrade pip
 pip install -r requirements.txt
+cp .env.example .env
+# edite .env e preencha ANVISA_API_TOKEN
 python -m app
 ```
 
@@ -64,50 +65,63 @@ python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 python -m pip install --upgrade pip
 pip install -r requirements.txt
+Copy-Item .env.example .env
+# edite .env e preencha ANVISA_API_TOKEN
 python -m app
 ```
 
 Abra: `http://127.0.0.1:5000`
 
+## Variáveis de ambiente
+
+Obrigatórias para produto (API oficial):
+
+- `ANVISA_API_TOKEN`: token Bearer da API oficial.
+- `ANVISA_API_BASE_URL`: base da API oficial (default: `https://consultas.anvisa.gov.br/api`).
+
+Opcionais:
+
+- `REQUEST_TIMEOUT` (default `30`)
+- `SSL_VERIFY` (default `false`)
+- `ANVISA_USER_AGENT`
+- `ENABLE_EXTERNAL_ALERT_FALLBACK` (default `true`)
+- `EXTERNAL_ALERT_LOOKUP_BASE_URL`
+
+> Nunca hardcode token no código. Use sempre variável de ambiente.
+
+## Estratégia de tratamento de erros (produto)
+
+A camada de produto trata explicitamente:
+
+- erro de autenticação (`401/403`) → token ausente/inválido/expirado;
+- rate limit (`429`) → limite excedido na API;
+- resposta vazia ou inválida → retorno inconclusivo da API;
+- falhas de rede/HTTP genéricas.
+
 ## Endpoint API
 
 - `GET /api/consultar?registro=10349000912`
 
-### Exemplo de retorno (sucesso com fallback de alertas)
+Exemplo resumido de retorno:
 
 ```json
 {
   "registro_anvisa": "10349000912",
   "found": true,
-  "product": {"nome_produto": "..."},
-  "alerts_count": 0,
-  "alerts": [],
-  "alerts_warning": "Falha na consulta automática...",
-  "alerts_manual_url": "https://antigo.anvisa.gov.br/alertas?tagsName=10349000912"
+  "product": {
+    "registro_anvisa": "10349000912",
+    "nome_produto": "..."
+  },
+  "alerts_status": "anti_bot_block",
+  "alerts_warning": "Fonte oficial bloqueou automação...",
+  "alerts_manual_links": {
+    "tecnovigilancia": "https://www.gov.br/anvisa/..."
+  }
 }
 ```
 
-## Configurações por variável de ambiente
+## Limitações reais (alertas)
 
-- `SSL_VERIFY` (default `false`): validação SSL no requests.
-- `REQUEST_TIMEOUT` (default `30`)
-- `PRODUCT_CACHE_TTL_HOURS` (default `24`)
-- `ANVISA_USER_AGENT` (opcional)
-- `ENABLE_EXTERNAL_ALERT_FALLBACK` (default `true`): habilita/desabilita fallback externo por registro.
-- `EXTERNAL_ALERT_LOOKUP_BASE_URL` (default `https://brunoroma.pythonanywhere.com`): base da consulta externa opcional.
-
-Exemplo:
-
-```bash
-export SSL_VERIFY=true
-python -m app
-```
-
-## Limitações reais das fontes da Anvisa
-
-- O portal de alertas pode bloquear acesso automatizado (403).
-- Alguns endpoints antigos podem falhar com SSL dependendo do ambiente local/rede.
-- Estrutura HTML do portal de alertas pode mudar, exigindo ajuste no parser.
-- Para reduzir indisponibilidade total, existe fallback de contingência para extração parcial de números de alerta.
-
-Por isso, a consulta de alertas foi isolada em `services/alerts_service.py` e organizada por camadas, com log por estratégia, motivo exato de falha e fallback externo configurável para manter utilidade mesmo com bloqueio 403.
+- Fontes de alertas podem bloquear automação (HTTP 403).
+- Por isso, a aplicação preserva fallback e **modo assistido** sem quebrar a consulta de produto.
+- Resultados de sinais públicos/web não equivalem a validação oficial automática.
