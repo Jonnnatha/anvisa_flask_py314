@@ -79,6 +79,31 @@ function render(data) {
     ? `<p class="meta">Camada: <strong>${escapeHtml(alertsResult.source || 'n/d')}</strong> · Confiança: <strong>${escapeHtml(alertsResult.confidence || 'n/d')}</strong>${Array.isArray(alertsResult.alert_ids) && alertsResult.alert_ids.length ? ` · IDs: ${escapeHtml(alertsResult.alert_ids.join(', '))}` : ''}</p>`
     : '';
 
+  const categorizedAlerts = (data.alerts || []).reduce((acc, alert) => {
+    const hasOfficial = Boolean(alert.link_oficial || alert.link);
+    if (hasOfficial) acc.automatic.push(alert);
+    else acc.partial.push(alert);
+    return acc;
+  }, { automatic: [], partial: [] });
+
+  const alertNumbersList = (data.alerts || [])
+    .map(a => a.numero_alerta || a.id)
+    .filter(Boolean);
+
+  const alertNumbersHtml = alertNumbersList.length
+    ? `<div class="manual-links"><p>Números de alerta identificados:</p><ul>${alertNumbersList.map(num => `
+      <li><a href="https://www.gov.br/anvisa/pt-br/search?SearchableText=${encodeURIComponent(`alerta ${num} anvisa`)}" target="_blank" rel="noopener noreferrer">Alerta ${escapeHtml(num)}</a></li>
+    `).join('')}</ul></div>`
+    : '';
+
+  const discoverySummaryHtml = `
+    <p class="meta">
+      Encontrados automaticamente: <strong>${categorizedAlerts.automatic.length}</strong>
+      · Identificação parcial: <strong>${categorizedAlerts.partial.length}</strong>
+      · Fontes bloqueadas sem identificação: <strong>${status === 'blocked_source' && !alertNumbersList.length ? 'sim' : 'não'}</strong>
+    </p>
+  `;
+
   let alertsHtml = '';
   if (data.alerts && data.alerts.length) {
     alertsHtml = data.alerts.map(a => `
@@ -99,7 +124,7 @@ function render(data) {
   } else if (status === 'no_alerts_found') {
     alertsHtml = '<p>Nenhum alerta de tecnovigilância encontrado para os termos consultados.</p>';
   } else if (status === 'blocked_source') {
-    alertsHtml = '<p>As fontes automáticas bloquearam parte da consulta. Confira abaixo os links de pesquisa manual recomendada.</p>';
+    alertsHtml = '<p>As fontes automáticas bloquearam a consulta e não foi possível identificar alertas nesta execução. Confira abaixo as opções de pesquisa manual.</p>';
   } else {
     alertsHtml = '<p>A consulta automática de alertas não foi conclusiva. Use os links oficiais abaixo para validação manual.</p>';
   }
@@ -125,6 +150,8 @@ function render(data) {
       ${renderStatusBadge(status)}
       ${warningHtml}
       ${alertsResultHtml}
+      ${discoverySummaryHtml}
+      ${alertNumbersHtml}
       ${alertsHtml}
       ${sourceHtml}
       ${manualLinksHtml}
