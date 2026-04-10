@@ -55,6 +55,7 @@ def search_by_registration(value: str) -> dict[str, Any]:
         'alerts_status': alert_result.get('status'),
         'alerts_warning': alert_result.get('warning'),
         'alerts_sources': alert_result.get('sources', []),
+        'alerts_strategy_log': alert_result.get('sources', []),
         'alerts_reference_links': alert_result.get('reference_links', []),
         'alerts_manual_url': alert_result.get('manual_url'),
         'alerts_manual_links': alert_result.get('manual_links', {}),

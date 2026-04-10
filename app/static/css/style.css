@@ -86,3 +86,11 @@ small { display: block; margin-top: 10px; color: var(--muted); }
 .manual-links a {
   color: #93c5fd;
 }
+
+.alert-item-full {
+  border-left: 4px solid #22c55e;
+}
+
+.alert-item-partial {
+  border-left: 4px solid #f59e0b;
+}
