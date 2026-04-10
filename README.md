@@ -6,8 +6,8 @@ Sistema web para consulta por **número de registro ANVISA (11 dígitos)** com f
 
 1. Consulta dados do equipamento/produto na base pública da Anvisa.
 2. Tenta consultar alertas de tecnovigilância no portal antigo da Anvisa.
-3. Se houver bloqueio anti-bot (HTTP 403), aplica fallback progressivo: busca indireta, extração parcial e espelho comunitário por registro.
-4. Mesmo em falha parcial, retorna os números de alerta identificados e links de pesquisa manual por alerta.
+3. Se houver bloqueio anti-bot (HTTP 403), aplica fallback progressivo em 5 camadas: oficial, alternativa, identificação parcial, fallback externo opcional e validação manual.
+4. Mesmo em falha parcial, retorna números de alerta com metadados: `numero_alerta`, `origem_da_descoberta`, `nivel_confianca`, `metodo`, `link_pesquisa_manual` e `link_oficial` quando disponível.
 
 ## Stack escolhida
 
@@ -93,6 +93,8 @@ Abra: `http://127.0.0.1:5000`
 - `REQUEST_TIMEOUT` (default `30`)
 - `PRODUCT_CACHE_TTL_HOURS` (default `24`)
 - `ANVISA_USER_AGENT` (opcional)
+- `ENABLE_EXTERNAL_ALERT_FALLBACK` (default `true`): habilita/desabilita fallback externo por registro.
+- `EXTERNAL_ALERT_LOOKUP_BASE_URL` (default `https://brunoroma.pythonanywhere.com`): base da consulta externa opcional.
 
 Exemplo:
 
@@ -108,4 +110,4 @@ python -m app
 - Estrutura HTML do portal de alertas pode mudar, exigindo ajuste no parser.
 - Para reduzir indisponibilidade total, existe fallback de contingência para extração parcial de números de alerta.
 
-Por isso, a consulta de alertas foi isolada em `services/alerts_service.py` com fallback seguro para consulta manual.
+Por isso, a consulta de alertas foi isolada em `services/alerts_service.py` e organizada por camadas, com log por estratégia, motivo exato de falha e fallback externo configurável para manter utilidade mesmo com bloqueio 403.
