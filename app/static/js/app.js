@@ -32,7 +32,7 @@ function renderStatusBadge(status) {
     alerts_found: 'Alertas localizados',
     no_alerts_found: 'Sem alertas encontrados',
     blocked_source: 'Fonte bloqueada',
-    partial_result: 'Resultado parcial',
+    partial_result: 'Resultado parcial útil',
     manual_validation_required: 'Validação manual necessária',
   };
   const label = labelByStatus[status] || status;
@@ -42,91 +42,80 @@ function renderStatusBadge(status) {
 function render(data) {
   const product = data.product || {};
   const status = data.alerts_status;
+  const alerts = data.alerts || [];
+
+  const fullAlerts = alerts.filter(a => Boolean(a.link_oficial || a.link));
+  const partialAlerts = alerts.filter(a => !a.link_oficial && !a.link);
+  const blockedWithoutId = status === 'blocked_source' && alerts.length === 0;
 
   const warningHtml = data.alerts_warning
     ? `<div class="feedback warning">${escapeHtml(data.alerts_warning)}</div>`
     : '';
 
   const sourceHtml = Array.isArray(data.alerts_sources) && data.alerts_sources.length
-    ? `<details class="alerts-sources"><summary>Fontes consultadas</summary><ul>${data.alerts_sources.map(s => {
-      const statusLabel = s.status || 'desconhecido';
+    ? `<details class="alerts-sources"><summary>Log técnico por estratégia</summary><ul>${data.alerts_sources.map(s => {
       const detail = s.details ? ` — ${escapeHtml(s.details)}` : '';
-      return `<li><strong>${escapeHtml(s.name || 'fonte')}</strong> (${escapeHtml(statusLabel)}) · <a href="${escapeHtml(s.url || '#')}" target="_blank" rel="noopener noreferrer">abrir fonte</a>${detail}</li>`;
+      const layer = s.layer ? `${escapeHtml(s.layer)} · ` : '';
+      return `<li><strong>${layer}${escapeHtml(s.name || 'fonte')}</strong> (${escapeHtml(s.status || 'desconhecido')}) · alertas: ${escapeHtml(String(s.alerts_count || 0))}${s.url ? ` · <a href="${escapeHtml(s.url)}" target="_blank" rel="noopener noreferrer">abrir</a>` : ''}${detail}</li>`;
     }).join('')}</ul></details>`
     : '';
 
-  const referenceLinksHtml = Array.isArray(data.alerts_reference_links) && data.alerts_reference_links.length
-    ? `<div class="manual-links"><p>Referências oficiais para consulta manual:</p><ul>${data.alerts_reference_links.map(item => `
-        <li><a href="${escapeHtml(item.link)}" target="_blank" rel="noopener noreferrer">${escapeHtml(item.title || item.link)}</a></li>
-      `).join('')}</ul></div>`
-    : '';
-
   const manualLinks = data.alerts_manual_links || {};
-  const manualLinksHtml = (manualLinks.principal || manualLinks.listagem || manualLinks.tecnovigilancia || manualLinks.busca_portal || manualLinks.busca_govbr || manualLinks.sistec_historico)
+  const manualLinksHtml = Object.values(manualLinks).some(Boolean)
     ? `<div class="manual-links"><p>Consulta manual recomendada:</p><ul>
         ${manualLinks.principal ? `<li><a href="${escapeHtml(manualLinks.principal)}" target="_blank" rel="noopener noreferrer">Portal de alertas (legado)</a></li>` : ''}
-        ${manualLinks.listagem ? `<li><a href="${escapeHtml(manualLinks.listagem)}" target="_blank" rel="noopener noreferrer">Listagem de alertas (portal legado)</a></li>` : ''}
-        ${manualLinks.tecnovigilancia ? `<li><a href="${escapeHtml(manualLinks.tecnovigilancia)}" target="_blank" rel="noopener noreferrer">Página oficial de Tecnovigilância (gov.br)</a></li>` : ''}
-        ${manualLinks.busca_portal ? `<li><a href="${escapeHtml(manualLinks.busca_portal)}" target="_blank" rel="noopener noreferrer">Busca avançada de alertas (legado)</a></li>` : ''}
-        ${manualLinks.busca_govbr ? `<li><a href="${escapeHtml(manualLinks.busca_govbr)}" target="_blank" rel="noopener noreferrer">Busca no portal gov.br (ANVISA)</a></li>` : ''}
-        ${manualLinks.sistec_historico ? `<li><a href="${escapeHtml(manualLinks.sistec_historico)}" target="_blank" rel="noopener noreferrer">Histórico SISTEC de alertas</a></li>` : ''}
+        ${manualLinks.listagem ? `<li><a href="${escapeHtml(manualLinks.listagem)}" target="_blank" rel="noopener noreferrer">Listagem de alertas (legado)</a></li>` : ''}
+        ${manualLinks.tecnovigilancia ? `<li><a href="${escapeHtml(manualLinks.tecnovigilancia)}" target="_blank" rel="noopener noreferrer">Página oficial de Tecnovigilância</a></li>` : ''}
+        ${manualLinks.busca_portal ? `<li><a href="${escapeHtml(manualLinks.busca_portal)}" target="_blank" rel="noopener noreferrer">Busca avançada legado</a></li>` : ''}
+        ${manualLinks.busca_govbr ? `<li><a href="${escapeHtml(manualLinks.busca_govbr)}" target="_blank" rel="noopener noreferrer">Busca gov.br ANVISA</a></li>` : ''}
+        ${manualLinks.sistec_historico ? `<li><a href="${escapeHtml(manualLinks.sistec_historico)}" target="_blank" rel="noopener noreferrer">Histórico SISTEC</a></li>` : ''}
+        ${manualLinks.espelho_comunitario ? `<li><a href="${escapeHtml(manualLinks.espelho_comunitario)}" target="_blank" rel="noopener noreferrer">Espelho comunitário por registro</a></li>` : ''}
       </ul></div>`
     : '';
 
-
-  const alertsResult = data.alerts_result || {};
-  const alertsResultHtml = alertsResult && (alertsResult.source || alertsResult.confidence || Array.isArray(alertsResult.alert_ids))
-    ? `<p class="meta">Camada: <strong>${escapeHtml(alertsResult.source || 'n/d')}</strong> · Confiança: <strong>${escapeHtml(alertsResult.confidence || 'n/d')}</strong>${Array.isArray(alertsResult.alert_ids) && alertsResult.alert_ids.length ? ` · IDs: ${escapeHtml(alertsResult.alert_ids.join(', '))}` : ''}</p>`
-    : '';
-
-  const categorizedAlerts = (data.alerts || []).reduce((acc, alert) => {
-    const hasOfficial = Boolean(alert.link_oficial || alert.link);
-    if (hasOfficial) acc.automatic.push(alert);
-    else acc.partial.push(alert);
-    return acc;
-  }, { automatic: [], partial: [] });
-
-  const alertNumbersList = (data.alerts || [])
-    .map(a => a.numero_alerta || a.id)
-    .filter(Boolean);
-
-  const alertNumbersHtml = alertNumbersList.length
-    ? `<div class="manual-links"><p>Números de alerta identificados:</p><ul>${alertNumbersList.map(num => `
+  const numbers = [...new Set(alerts.map(a => a.numero_alerta || a.id).filter(Boolean))];
+  const alertNumbersHtml = numbers.length
+    ? `<div class="manual-links"><p><strong>Números de alerta identificados:</strong></p><ul>${numbers.map(num => `
       <li><a href="https://www.gov.br/anvisa/pt-br/search?SearchableText=${encodeURIComponent(`alerta ${num} anvisa`)}" target="_blank" rel="noopener noreferrer">Alerta ${escapeHtml(num)}</a></li>
     `).join('')}</ul></div>`
     : '';
 
   const discoverySummaryHtml = `
     <p class="meta">
-      Encontrados automaticamente: <strong>${categorizedAlerts.automatic.length}</strong>
-      · Identificação parcial: <strong>${categorizedAlerts.partial.length}</strong>
-      · Fontes bloqueadas sem identificação: <strong>${status === 'blocked_source' && !alertNumbersList.length ? 'sim' : 'não'}</strong>
+      Alerta completo: <strong>${fullAlerts.length}</strong>
+      · Alerta parcialmente identificado: <strong>${partialAlerts.length}</strong>
+      · Fonte bloqueada sem identificação: <strong>${blockedWithoutId ? 'sim' : 'não'}</strong>
     </p>
   `;
 
   let alertsHtml = '';
-  if (data.alerts && data.alerts.length) {
-    alertsHtml = data.alerts.map(a => `
-      <article class="alert-item">
-        <h4>${escapeHtml(a.title || a.titulo || 'Alerta sem título')}</h4>
-        <div class="meta">
-          ${escapeHtml(a.date || a.data || 'Data não informada')}
-          ${(a.numero_alerta || a.id) ? ` • Nº ${escapeHtml(a.numero_alerta || a.id)}` : ''}
-          ${a.origem_da_descoberta ? ` • Origem: ${escapeHtml(a.origem_da_descoberta)}` : ''}
-        </div>
-        ${a.summary ? `<p>${escapeHtml(a.summary)}</p>` : ''}
-        <div class="meta">
-          ${a.link_oficial || a.link ? `<a href="${escapeHtml(a.link_oficial || a.link)}" target="_blank" rel="noopener noreferrer">Abrir link oficial</a>` : '<span>Link oficial não confirmado</span>'}
-          ${a.link_pesquisa_manual ? ` · <a href="${escapeHtml(a.link_pesquisa_manual)}" target="_blank" rel="noopener noreferrer">Pesquisar manualmente este alerta</a>` : ''}
-        </div>
-      </article>
-    `).join('');
+  if (alerts.length) {
+    alertsHtml = alerts.map(a => {
+      const isPartial = !a.link_oficial && !a.link;
+      const numero = a.numero_alerta || a.id;
+      return `
+        <article class="alert-item ${isPartial ? 'alert-item-partial' : 'alert-item-full'}">
+          <h4>${escapeHtml(a.title || a.titulo || (numero ? `Alerta ${numero}` : 'Alerta'))}</h4>
+          <div class="meta">
+            ${escapeHtml(a.date || a.data || 'Data não informada')}
+            ${numero ? ` • <strong>Nº ${escapeHtml(numero)}</strong>` : ''}
+            ${a.origem_da_descoberta ? ` • Origem: ${escapeHtml(a.origem_da_descoberta)}` : ''}
+            ${a.nivel_confianca ? ` • Confiança: ${escapeHtml(a.nivel_confianca)}` : ''}
+          </div>
+          ${a.summary ? `<p>${escapeHtml(a.summary)}</p>` : ''}
+          <div class="meta">
+            ${a.link_oficial || a.link ? `<a href="${escapeHtml(a.link_oficial || a.link)}" target="_blank" rel="noopener noreferrer">Abrir link oficial</a>` : '<span>Alerta parcial (sem link oficial confirmado)</span>'}
+            ${a.link_pesquisa_manual ? ` · <a href="${escapeHtml(a.link_pesquisa_manual)}" target="_blank" rel="noopener noreferrer">Pesquisar este alerta</a>` : ''}
+          </div>
+        </article>
+      `;
+    }).join('');
   } else if (status === 'no_alerts_found') {
     alertsHtml = '<p>Nenhum alerta de tecnovigilância encontrado para os termos consultados.</p>';
   } else if (status === 'blocked_source') {
-    alertsHtml = '<p>As fontes automáticas bloquearam a consulta e não foi possível identificar alertas nesta execução. Confira abaixo as opções de pesquisa manual.</p>';
+    alertsHtml = '<p>Fontes oficiais bloquearam a consulta automática nesta execução. O sistema tentou estratégias indiretas e mantém links de contingência abaixo.</p>';
   } else {
-    alertsHtml = '<p>A consulta automática de alertas não foi conclusiva. Use os links oficiais abaixo para validação manual.</p>';
+    alertsHtml = '<p>A consulta automática não foi conclusiva, mas as estratégias e links de validação estão disponíveis abaixo.</p>';
   }
 
   resultado.innerHTML = `
@@ -149,13 +138,11 @@ function render(data) {
       <h2>Alertas de tecnovigilância (${data.alerts_count || 0})</h2>
       ${renderStatusBadge(status)}
       ${warningHtml}
-      ${alertsResultHtml}
       ${discoverySummaryHtml}
       ${alertNumbersHtml}
       ${alertsHtml}
       ${sourceHtml}
       ${manualLinksHtml}
-      ${referenceLinksHtml}
     </div>
   `;
   resultado.classList.remove('hidden');
@@ -172,7 +159,7 @@ form.addEventListener('submit', async (event) => {
     return;
   }
 
-  setFeedback('Consultando fontes da Anvisa...', 'ok');
+  setFeedback('Consultando fontes da Anvisa com estratégias em camadas...', 'ok');
 
   try {
     const response = await fetch(`/api/consultar?registro=${encodeURIComponent(registro)}`);

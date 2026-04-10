@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -10,6 +11,8 @@ import requests
 from bs4 import BeautifulSoup
 
 from app.core.config import ALERTS_PAGE_URL, DATA_DIR, REQUEST_TIMEOUT, SSL_VERIFY, USER_AGENT
+
+logger = logging.getLogger(__name__)
 
 ALERT_NUMBER_RE = re.compile(r'\b(\d{3,6})\b')
 DATE_RE = re.compile(r'(\d{2}/\d{2}/\d{4})')
@@ -26,7 +29,6 @@ LEGACY_ADVANCED_SEARCH_URL = (
 GOVBR_SEARCH_URL = 'https://www.gov.br/anvisa/pt-br/search'
 SISTEC_ALERT_SEARCH_URL = 'http://www.anvisa.gov.br/sistec/alerta/consultaralerta.asp'
 COMMUNITY_REGISTRY_LOOKUP_URL = 'https://brunoroma.pythonanywhere.com/registro/{registro}'
-
 LEGACY_ALERTS_LIST_URL = ALERTS_PAGE_URL
 
 STATUS_ALERTS_FOUND = 'alerts_found'
@@ -38,7 +40,6 @@ STATUS_MANUAL_VALIDATION_REQUIRED = 'manual_validation_required'
 INDEX_CACHE_FILE = DATA_DIR / 'alerts_index_cache.json'
 INDEX_CACHE_TTL_HOURS = 12
 MAX_LISTING_PAGES = 5
-
 
 BROWSER_HEADERS = {
     'User-Agent': USER_AGENT,
@@ -69,11 +70,10 @@ def _parse_date(text: str) -> str | None:
 
 
 def _extract_alert_number(text: str) -> str | None:
-    lowered = (text or '').lower()
-    contextual = re.search(r'alerta\s*n?[ºo]?\s*[:\-]?\s*(\d{3,6})', lowered, re.IGNORECASE)
+    contextual = re.search(r'alerta\s*n?[ºo]?\s*[:\-]?\s*(\d{3,6})', text or '', re.IGNORECASE)
     if contextual:
         return contextual.group(1)
-    generic = ALERT_NUMBER_RE.search(lowered)
+    generic = ALERT_NUMBER_RE.search(text or '')
     return generic.group(1) if generic else None
 
 
@@ -82,9 +82,7 @@ def _extract_registrations(text: str) -> set[str]:
 
 
 def _classify_http_status(status_code: int) -> str:
-    if status_code in {401, 403}:
-        return STATUS_BLOCKED_SOURCE
-    return STATUS_MANUAL_VALIDATION_REQUIRED
+    return STATUS_BLOCKED_SOURCE if status_code in {401, 403} else STATUS_MANUAL_VALIDATION_REQUIRED
 
 
 def _classify_request_failure(exc: Exception) -> str:
@@ -98,14 +96,11 @@ def _classify_request_failure(exc: Exception) -> str:
 def _build_warning(status: str, details: str | None = None) -> str:
     base = {
         STATUS_BLOCKED_SOURCE: 'Fonte bloqueou consulta automática (ex.: 403/anti-bot).',
-        STATUS_PARTIAL_RESULT: 'Resultado parcial: algumas camadas consultadas, mas sem confirmação completa.',
+        STATUS_PARTIAL_RESULT: 'Resultado parcial: números identificados sem confirmação completa do alerta.',
         STATUS_MANUAL_VALIDATION_REQUIRED: 'Validação manual recomendada por limitação da fonte ou parsing.',
         STATUS_NO_ALERTS_FOUND: 'Nenhum alerta localizado nas camadas consultadas.',
     }.get(status, 'Falha na consulta automática de alertas.')
-
-    if details:
-        return f'{base} Detalhes técnicos: {details}'
-    return base
+    return f'{base} Detalhes técnicos: {details}' if details else base
 
 
 def _manual_links(registro: str) -> dict[str, str]:
@@ -114,9 +109,7 @@ def _manual_links(registro: str) -> dict[str, str]:
         'principal': f'{ALERTS_PAGE_URL}?tagsName={registro}',
         'listagem': ALERTS_PAGE_URL,
         'tecnovigilancia': GOVBR_TECNOVIG_ALERTS_URL,
-        'busca_portal': (
-            f'{LEGACY_ADVANCED_SEARCH_URL}&keywords={registro}&dataInicial=&dataFinal=&categoryIds=34506'
-        ),
+        'busca_portal': f'{LEGACY_ADVANCED_SEARCH_URL}&keywords={registro}&dataInicial=&dataFinal=&categoryIds=34506',
         'busca_govbr': f'{GOVBR_SEARCH_URL}?SearchableText={search_query}',
         'sistec_historico': SISTEC_ALERT_SEARCH_URL,
         'espelho_comunitario': COMMUNITY_REGISTRY_LOOKUP_URL.format(registro=registro),
@@ -124,15 +117,32 @@ def _manual_links(registro: str) -> dict[str, str]:
 
 
 def _normalize_terms(terms: list[str]) -> list[str]:
-    clean_terms: list[str] = []
-    for term in terms:
-        txt = (term or '').strip().lower()
-        if len(txt) >= 4:
-            clean_terms.append(txt)
-    return list(dict.fromkeys(clean_terms))
+    return list(dict.fromkeys((t or '').strip().lower() for t in terms if len((t or '').strip()) >= 4))
 
 
-def _parse_listing_alerts(html: str, base_url: str, terms: list[str]) -> tuple[list[dict[str, Any]], str | None]:
+def _enrich_alert(alert: dict[str, Any], default_origin: str, confidence: str, registro: str) -> dict[str, Any]:
+    number = str(alert.get('numero_alerta') or alert.get('id') or '').strip() or None
+    manual = alert.get('link_pesquisa_manual') or (
+        f'{GOVBR_SEARCH_URL}?SearchableText={quote_plus(f"alerta {number} anvisa {registro}")}' if number else None
+    )
+    return {
+        'numero_alerta': number,
+        'id': number or alert.get('id'),
+        'title': alert.get('title') or alert.get('titulo') or (f'Alerta {number}' if number else 'Alerta'),
+        'titulo': alert.get('title') or alert.get('titulo'),
+        'date': alert.get('date') or alert.get('data'),
+        'data': alert.get('date') or alert.get('data'),
+        'summary': alert.get('summary'),
+        'link': alert.get('link') or alert.get('link_oficial'),
+        'link_oficial': alert.get('link_oficial') or alert.get('link'),
+        'link_pesquisa_manual': manual,
+        'origem_da_descoberta': alert.get('origem_da_descoberta') or default_origin,
+        'nivel_confianca': alert.get('nivel_confianca') or confidence,
+        'matched_terms': alert.get('matched_terms', []),
+    }
+
+
+def _parse_listing_alerts(html: str, base_url: str, terms: list[str], origin: str) -> tuple[list[dict[str, Any]], str | None]:
     soup = BeautifulSoup(html, 'html.parser')
     alerts: list[dict[str, Any]] = []
     seen: set[str] = set()
@@ -142,50 +152,71 @@ def _parse_listing_alerts(html: str, base_url: str, terms: list[str]) -> tuple[l
         title = link.get_text(' ', strip=True)
         if not href or not title:
             continue
-
         full_link = urljoin(base_url, href)
-        normalized_link = full_link.lower()
-        parent_text = link.parent.get_text(' ', strip=True) if link.parent else ''
-        merged = f'{title} {parent_text}'.strip()
+        merged = f'{title} {(link.parent.get_text(" ", strip=True) if link.parent else "")}'.strip()
         merged_lower = merged.lower()
-
         if full_link in seen:
             continue
-        if 'alerta' not in merged_lower and not any(term in merged_lower for term in terms):
+        if terms and not any(term in merged_lower for term in terms):
             continue
         if len(title.strip()) < 8:
             continue
-        if normalized_link.rstrip('/') in {
-            ALERTS_PAGE_URL.rstrip('/'),
-            LEGACY_ALERTS_LIST_URL.rstrip('/'),
-        }:
-            continue
-        if normalized_link.startswith(f"{ALERTS_PAGE_URL.lower()}#"):
-            continue
-
-        alert_id = _extract_alert_number(merged)
-        alerts.append({
-            'numero_alerta': alert_id,
-            'id': alert_id,
+        alerts.append(_enrich_alert({
+            'numero_alerta': _extract_alert_number(merged),
             'title': title,
-            'titulo': title,
             'date': _parse_date(merged),
-            'data': _parse_date(merged),
-            'summary': parent_text[:400],
-            'link': full_link,
+            'summary': merged[:400],
             'link_oficial': full_link,
-            'link_pesquisa_manual': None,
-            'origem_da_descoberta': 'listagem',
+            'origem_da_descoberta': origin,
             'matched_terms': [term for term in terms if term in merged_lower],
-        })
+        }, origin, 'high', ''))
         seen.add(full_link)
 
-    next_link = None
     pager = soup.select_one('a[rel="next"], li.next a[href], a.next')
-    if pager and pager.get('href'):
-        next_link = urljoin(base_url, pager.get('href').strip())
-
+    next_link = urljoin(base_url, pager.get('href').strip()) if pager and pager.get('href') else None
     return alerts, next_link
+
+
+def _extract_alert_candidates_from_text(payload: str, origin: str, registro: str, terms: list[str] | None = None) -> list[dict[str, Any]]:
+    candidates: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    normalized_terms = _normalize_terms(terms or [])
+    for match in re.finditer(r'alerta(?:\s*sanit[aá]rio)?\s*n?[ºo]?\s*[:\-]?\s*(\d{2,6})', payload or '', re.IGNORECASE):
+        number = match.group(1)
+        if number in seen:
+            continue
+        around = (payload or '')[max(0, match.start() - 180): match.end() + 180]
+        around_lower = around.lower()
+        if registro not in around_lower and normalized_terms and not any(term in around_lower for term in normalized_terms):
+            continue
+        seen.add(number)
+        candidates.append(_enrich_alert({
+            'numero_alerta': number,
+            'summary': around[:400],
+            'origem_da_descoberta': origin,
+        }, origin, 'medium', registro))
+    return candidates
+
+
+def _extract_alert_numbers_from_payload(payload: str) -> list[str]:
+    body = payload or ''
+    # Prioriza formato observado no endpoint de referência: "Alerta(s): [4412 4361 ...]".
+    # Isso evita captar anos/contagens e reduz falso-positivo no fallback externo.
+    bracket_match = re.search(r'alerta\(s\)\s*:\s*\[([^\]]+)\]', body, re.IGNORECASE)
+    if bracket_match:
+        pool = bracket_match.group(1)
+    else:
+        context_match = re.search(r'alerta[^\n:]*:\s*(.+)$', body, re.IGNORECASE)
+        pool = context_match.group(1) if context_match else body
+
+    seen: set[str] = set()
+    result: list[str] = []
+    for number in re.findall(r'\b\d{3,6}\b', pool):
+        if number in seen:
+            continue
+        seen.add(number)
+        result.append(number)
+    return result
 
 
 def _load_cached_index() -> dict[str, Any] | None:
@@ -202,456 +233,217 @@ def _load_cached_index() -> dict[str, Any] | None:
 
 
 def _save_cached_index(entries: list[dict[str, Any]]) -> None:
-    payload = {
-        'generated_at': datetime.now(timezone.utc).isoformat(),
-        'entries': entries,
-    }
-    INDEX_CACHE_FILE.write_text(json.dumps(payload, ensure_ascii=False), encoding='utf-8')
-
-
-def _layer_direct_query(session: requests.Session, registro: str, terms: list[str]) -> tuple[list[dict[str, Any]], str | None, str | None]:
-    try:
-        response = session.get(
-            ALERTS_PAGE_URL,
-            params={'tagsName': registro},
-            timeout=REQUEST_TIMEOUT,
-            verify=SSL_VERIFY,
-            allow_redirects=True,
-        )
-        if response.status_code >= 400:
-            return [], _classify_http_status(response.status_code), f'HTTP {response.status_code}'
-        alerts, _ = _parse_listing_alerts(response.text, ALERTS_PAGE_URL, terms)
-        return alerts, None, None
-    except Exception as exc:
-        return [], _classify_request_failure(exc), str(exc)
-
-
-def _layer_listing_scan(session: requests.Session, terms: list[str]) -> tuple[list[dict[str, Any]], str | None, str | None]:
-    url = LEGACY_ALERTS_LIST_URL
-    collected: list[dict[str, Any]] = []
-
-    try:
-        for _ in range(MAX_LISTING_PAGES):
-            response = session.get(url, timeout=REQUEST_TIMEOUT, verify=SSL_VERIFY, allow_redirects=True)
-            if response.status_code >= 400:
-                return collected, _classify_http_status(response.status_code), f'HTTP {response.status_code}'
-            items, next_url = _parse_listing_alerts(response.text, url, terms)
-            collected.extend(items)
-            if not next_url:
-                break
-            url = next_url
-        return collected, None, None
-    except Exception as exc:
-        return collected, _classify_request_failure(exc), str(exc)
-
-
-def _extract_alert_candidates_from_text(
-    html: str,
-    search_terms: list[str],
-    source_url: str,
-    origin: str,
-) -> list[dict[str, Any]]:
-    """
-    Fallback resiliente para páginas onde a busca é limitada/indireta.
-    Extrai pares "alerta + número" do texto bruto e monta links úteis.
-    """
-    soup = BeautifulSoup(html, 'html.parser')
-    text = soup.get_text(' ', strip=True)
-    text_lower = text.lower()
-    normalized_terms = _normalize_terms(search_terms)
-
-    if normalized_terms and not any(term in text_lower for term in normalized_terms):
-        # Mesmo sem match textual explícito, seguimos tentando extrair identificadores
-        # para não perder alertas parcialmente identificados.
-        pass
-
-    candidates: list[dict[str, Any]] = []
-    seen: set[str] = set()
-    pattern = re.compile(r'alerta(?:\s*sanit[aá]rio)?\s*n?[ºo]?\s*[:\-]?\s*(\d{2,6})', re.IGNORECASE)
-    for match in pattern.finditer(text):
-        number = match.group(1)
-        if number in seen:
-            continue
-        seen.add(number)
-        around = text[max(0, match.start() - 140): match.end() + 160].strip()
-        candidates.append({
-            'numero_alerta': number,
-            'id': number,
-            'title': f'Alerta {number} (identificação parcial)',
-            'titulo': None,
-            'date': _parse_date(around),
-            'data': _parse_date(around),
-            'summary': around[:400],
-            'link': None,
-            'link_oficial': None,
-            'link_pesquisa_manual': f'{GOVBR_SEARCH_URL}?SearchableText={quote_plus(f"alerta {number} anvisa")}',
-            'origem_da_descoberta': origin,
-            'matched_terms': [term for term in normalized_terms if term in around.lower()],
-        })
-
-    if not candidates:
-        return []
-    return candidates
-
-
-def _extract_alert_numbers_from_payload(payload: str) -> list[str]:
-    """
-    Extrai números de alerta de respostas livres (texto/HTML/JSON) sem depender
-    de estrutura específica da página.
-    """
-    numbers: list[str] = []
-    seen: set[str] = set()
-    for number in re.findall(r'\b\d{3,6}\b', payload or ''):
-        if number in seen:
-            continue
-        seen.add(number)
-        numbers.append(number)
-    return numbers
-
-
-def _build_partial_alert_from_number(number: str, origin: str) -> dict[str, Any]:
-    query = quote_plus(f'alerta {number} anvisa')
-    return {
-        'numero_alerta': number,
-        'id': number,
-        'title': f'Alerta {number} (identificação parcial)',
-        'titulo': None,
-        'date': None,
-        'data': None,
-        'summary': None,
-        'link': None,
-        'link_oficial': None,
-        'link_pesquisa_manual': f'{GOVBR_SEARCH_URL}?SearchableText={query}',
-        'origem_da_descoberta': origin,
-        'matched_terms': [],
-    }
-
-
-def _layer_community_registry_lookup(
-    session: requests.Session,
-    registro: str,
-) -> tuple[list[dict[str, Any]], str | None, str | None]:
-    """
-    Camada de contingência para bloquear cenário "apenas 403".
-    Consulta um espelho público que, em alguns ambientes, consegue retornar ao
-    menos os números de alerta por registro.
-    """
-    endpoint = COMMUNITY_REGISTRY_LOOKUP_URL.format(registro=registro)
-    try:
-        response = session.get(
-            endpoint,
-            timeout=REQUEST_TIMEOUT,
-            verify=SSL_VERIFY,
-            allow_redirects=True,
-        )
-        if response.status_code >= 400:
-            return [], _classify_http_status(response.status_code), f'HTTP {response.status_code}'
-
-        raw = response.text
-        numbers = _extract_alert_numbers_from_payload(raw)
-        if not numbers:
-            return [], None, None
-        alerts = [_build_partial_alert_from_number(number, 'community_registry_lookup') for number in numbers]
-        return alerts, None, None
-    except Exception as exc:
-        return [], _classify_request_failure(exc), str(exc)
-
-
-def _layer_legacy_advanced_search(
-    session: requests.Session,
-    registro: str,
-    terms: list[str],
-) -> tuple[list[dict[str, Any]], str | None, str | None]:
-    try:
-        response = session.get(
-            LEGACY_ADVANCED_SEARCH_URL,
-            params={
-                'keywords': registro,
-                'dataInicial': '',
-                'dataFinal': '',
-                'categoryIds': '34506',
-            },
-            timeout=REQUEST_TIMEOUT,
-            verify=SSL_VERIFY,
-            allow_redirects=True,
-        )
-        if response.status_code >= 400:
-            return [], _classify_http_status(response.status_code), f'HTTP {response.status_code}'
-        alerts, _ = _parse_listing_alerts(response.text, response.url, terms)
-        if alerts:
-            for alert in alerts:
-                alert['origem_da_descoberta'] = 'legacy_advanced_search'
-            return alerts, None, None
-        partial = _extract_alert_candidates_from_text(
-            response.text,
-            [registro] + terms,
-            response.url,
-            'legacy_advanced_search_partial',
-        )
-        return partial, None, None
-    except Exception as exc:
-        return [], _classify_request_failure(exc), str(exc)
-
-
-def _layer_govbr_search_fallback(
-    session: requests.Session,
-    registro: str,
-    terms: list[str],
-) -> tuple[list[dict[str, Any]], str | None, str | None]:
-    try:
-        response = session.get(
-            GOVBR_SEARCH_URL,
-            params={'SearchableText': f'alerta tecnovigilancia {registro}'},
-            timeout=REQUEST_TIMEOUT,
-            verify=SSL_VERIFY,
-            allow_redirects=True,
-        )
-        if response.status_code >= 400:
-            return [], _classify_http_status(response.status_code), f'HTTP {response.status_code}'
-        partial = _extract_alert_candidates_from_text(
-            response.text,
-            [registro] + terms,
-            response.url,
-            'govbr_search_partial',
-        )
-        return partial, None, None
-    except Exception as exc:
-        return [], _classify_request_failure(exc), str(exc)
-
-
-def _layer_textual_search(candidates: list[dict[str, Any]], registro: str, terms: list[str]) -> list[dict[str, Any]]:
-    normalized = _normalize_terms([registro] + terms)
-    filtered: list[dict[str, Any]] = []
-
-    for alert in candidates:
-        blob = ' '.join([
-            alert.get('title', ''),
-            alert.get('summary', ''),
-            alert.get('link', ''),
-            ' '.join(alert.get('matched_terms', [])),
-        ]).lower()
-        if registro in blob:
-            filtered.append(alert)
-            continue
-        if any(term in blob for term in normalized):
-            filtered.append(alert)
-            continue
-
-    return filtered
+    INDEX_CACHE_FILE.write_text(
+        json.dumps({'generated_at': datetime.now(timezone.utc).isoformat(), 'entries': entries}, ensure_ascii=False),
+        encoding='utf-8',
+    )
 
 
 def _index_entries_from_alerts(alerts: list[dict[str, Any]]) -> list[dict[str, Any]]:
     entries: list[dict[str, Any]] = []
     for alert in alerts:
         searchable = ' '.join([alert.get('title', ''), alert.get('summary', '')])
-        registrations = sorted(_extract_registrations(searchable))
         entries.append({
             'id': alert.get('id'),
             'title': alert.get('title'),
-            'link': alert.get('link'),
+            'link': alert.get('link_oficial') or alert.get('link'),
             'date': alert.get('date'),
-            'registrations': registrations,
+            'registrations': sorted(_extract_registrations(searchable)),
             'search_blob': searchable.lower()[:2000],
         })
     return entries
 
 
 def _search_in_index(registro: str, terms: list[str], entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    normalized_terms = _normalize_terms([registro] + terms)
+    normalized = _normalize_terms([registro] + terms)
     results: list[dict[str, Any]] = []
-
     for entry in entries:
-        regs = entry.get('registrations', [])
         blob = entry.get('search_blob', '')
-        if registro in regs or any(term in blob for term in normalized_terms):
-            results.append({
+        regs = entry.get('registrations', [])
+        if registro in regs or any(term in blob for term in normalized):
+            results.append(_enrich_alert({
                 'numero_alerta': entry.get('id'),
-                'id': entry.get('id'),
                 'title': entry.get('title'),
-                'titulo': entry.get('title'),
                 'date': entry.get('date'),
-                'data': entry.get('date'),
-                'summary': None,
-                'link': entry.get('link'),
                 'link_oficial': entry.get('link'),
-                'link_pesquisa_manual': None,
-                'origem_da_descoberta': 'index_cache_lookup',
-                'matched_terms': [term for term in normalized_terms if term in blob],
-            })
-
+                'origem_da_descoberta': 'official_sources_index_cache',
+            }, 'official_sources_index_cache', 'medium', registro))
     return results
 
 
 def _dedupe_alerts(alerts: list[dict[str, Any]]) -> list[dict[str, Any]]:
     unique: list[dict[str, Any]] = []
-    seen_keys: set[str] = set()
+    seen: set[str] = set()
     for alert in alerts:
-        key = str(alert.get('id') or alert.get('link') or alert.get('title'))
-        if key in seen_keys:
+        key = str(alert.get('numero_alerta') or alert.get('id') or alert.get('link_oficial') or alert.get('title'))
+        if key in seen:
             continue
-        seen_keys.add(key)
+        seen.add(key)
         unique.append(alert)
     return unique
 
 
-def _format_alerts_payload(alerts: list[dict[str, Any]], source: str, confidence: str) -> dict[str, Any]:
+def _record_attempt(attempts: list[dict[str, Any]], layer: str, name: str, url: str, status: str, details: str | None, count: int = 0) -> None:
+    attempts.append({'layer': layer, 'name': name, 'url': url, 'status': status, 'details': details, 'alerts_count': count})
+    logger.info('alerts_strategy layer=%s source=%s status=%s alerts=%s details=%s', layer, name, status, count, details)
+
+
+def _final_payload(alerts: list[dict[str, Any]], source: str, confidence: str) -> dict[str, Any]:
     deduped = _dedupe_alerts(alerts)
-    alert_ids = [str(item['id']) for item in deduped if item.get('id')]
-    return {
-        'count': len(deduped),
-        'alert_ids': alert_ids,
-        'alerts': deduped,
-        'source': source,
-        'confidence': confidence,
-    }
+    ids = [str(a.get('numero_alerta') or a.get('id')) for a in deduped if a.get('numero_alerta') or a.get('id')]
+    return {'count': len(deduped), 'alert_ids': ids, 'alerts': deduped, 'source': source, 'confidence': confidence}
 
 
 def find_alerts_by_registration(registro: str, product: dict[str, Any] | None = None) -> dict[str, Any]:
-    manufacturer = (product or {}).get('fabricante') or ''
-    product_name = (product or {}).get('nome_produto') or ''
-    holder = (product or {}).get('detentor_registro') or ''
-
-    search_terms = [registro, manufacturer, product_name, holder]
-    search_terms = [term.strip() for term in search_terms if term and term.strip()]
+    """
+    Estratégia em camadas para evitar resposta inútil em caso de 403.
+    Ordem: official_sources -> alternative_search -> partial_identifier -> external_fallback.
+    """
+    search_terms = [registro, (product or {}).get('fabricante') or '', (product or {}).get('nome_produto') or '', (product or {}).get('detentor_registro') or '']
+    search_terms = [t.strip() for t in search_terms if t and t.strip()]
     manual_links = _manual_links(registro)
-
     session = _build_session()
-    sources: list[dict[str, Any]] = []
 
-    direct_alerts, direct_status, direct_details = _layer_direct_query(session, registro, search_terms)
-    sources.append({
-        'name': 'anvisa_legado_tagsName',
-        'url': ALERTS_PAGE_URL,
-        'status': 'ok' if direct_status is None else direct_status,
-        'details': direct_details,
-    })
+    all_alerts: list[dict[str, Any]] = []
+    attempts: list[dict[str, Any]] = []
+    partial_pool: list[dict[str, Any]] = []
+    error_details: list[str] = []
 
-    if direct_alerts:
-        payload = _format_alerts_payload(direct_alerts, 'direct_query', 'high')
-        return {
-            **payload,
-            'status': STATUS_ALERTS_FOUND,
-            'warning': None,
-            'manual_url': manual_links['principal'],
-            'manual_links': manual_links,
-            'sources': sources,
-        }
+    # 1) official_sources
+    official_statuses: list[str] = []
+    try:
+        r = session.get(ALERTS_PAGE_URL, params={'tagsName': registro}, timeout=REQUEST_TIMEOUT, verify=SSL_VERIFY, allow_redirects=True)
+        if r.status_code >= 400:
+            st = _classify_http_status(r.status_code)
+            official_statuses.append(st)
+            _record_attempt(attempts, 'official_sources', 'anvisa_legado_tagsName', ALERTS_PAGE_URL, st, f'HTTP {r.status_code}')
+            error_details.append(f'tagsName HTTP {r.status_code}')
+            partial_pool.extend(_extract_alert_candidates_from_text(r.text, 'official_tags_text_probe', registro, search_terms))
+        else:
+            items, _ = _parse_listing_alerts(r.text, ALERTS_PAGE_URL, _normalize_terms(search_terms), 'official_tags_listing')
+            all_alerts.extend([_enrich_alert(a, 'official_tags_listing', 'high', registro) for a in items])
+            partial_pool.extend(_extract_alert_candidates_from_text(r.text, 'official_tags_text_probe', registro, search_terms))
+            _record_attempt(attempts, 'official_sources', 'anvisa_legado_tagsName', ALERTS_PAGE_URL, 'ok', None, len(items))
+    except Exception as exc:
+        st = _classify_request_failure(exc)
+        official_statuses.append(st)
+        _record_attempt(attempts, 'official_sources', 'anvisa_legado_tagsName', ALERTS_PAGE_URL, st, str(exc))
+        error_details.append(str(exc))
 
-    listing_alerts, listing_status, listing_details = _layer_listing_scan(session, search_terms)
-    sources.append({
-        'name': 'anvisa_legado_listagem',
-        'url': LEGACY_ALERTS_LIST_URL,
-        'status': 'ok' if listing_status is None else listing_status,
-        'details': listing_details,
-    })
+    listing_alerts: list[dict[str, Any]] = []
+    try:
+        url = LEGACY_ALERTS_LIST_URL
+        for _ in range(MAX_LISTING_PAGES):
+            r = session.get(url, timeout=REQUEST_TIMEOUT, verify=SSL_VERIFY, allow_redirects=True)
+            if r.status_code >= 400:
+                st = _classify_http_status(r.status_code)
+                official_statuses.append(st)
+                _record_attempt(attempts, 'official_sources', 'anvisa_legado_listagem', url, st, f'HTTP {r.status_code}', len(listing_alerts))
+                error_details.append(f'listagem HTTP {r.status_code}')
+                break
+            items, next_url = _parse_listing_alerts(r.text, url, _normalize_terms(search_terms), 'official_listagem_scan')
+            listing_alerts.extend(items)
+            partial_pool.extend(_extract_alert_candidates_from_text(r.text, 'official_listagem_text_probe', registro, search_terms))
+            if not next_url:
+                _record_attempt(attempts, 'official_sources', 'anvisa_legado_listagem', url, 'ok', None, len(listing_alerts))
+                break
+            url = next_url
+        all_alerts.extend([_enrich_alert(a, 'official_listagem_scan', 'high', registro) for a in listing_alerts])
+    except Exception as exc:
+        st = _classify_request_failure(exc)
+        official_statuses.append(st)
+        _record_attempt(attempts, 'official_sources', 'anvisa_legado_listagem', LEGACY_ALERTS_LIST_URL, st, str(exc), len(listing_alerts))
+        error_details.append(str(exc))
 
-    alt_alerts, alt_status, alt_details = _layer_legacy_advanced_search(session, registro, search_terms)
-    sources.append({
-        'name': 'anvisa_legado_busca_avancada',
-        'url': LEGACY_ADVANCED_SEARCH_URL,
-        'status': 'ok' if alt_status is None else alt_status,
-        'details': alt_details,
-    })
+    # 2) alternative_search (variações Anvisa / gov.br)
+    for name, url, params in [
+        ('anvisa_legado_busca_avancada', LEGACY_ADVANCED_SEARCH_URL, {'keywords': registro, 'dataInicial': '', 'dataFinal': '', 'categoryIds': '34506'}),
+        ('govbr_search', GOVBR_SEARCH_URL, {'SearchableText': f'alerta tecnovigilancia {registro}'}),
+    ]:
+        try:
+            r = session.get(url, params=params, timeout=REQUEST_TIMEOUT, verify=SSL_VERIFY, allow_redirects=True)
+            if r.status_code >= 400:
+                st = _classify_http_status(r.status_code)
+                _record_attempt(attempts, 'alternative_search', name, url, st, f'HTTP {r.status_code}')
+                error_details.append(f'{name} HTTP {r.status_code}')
+                partial_pool.extend(_extract_alert_candidates_from_text(r.text, f'{name}_text_probe', registro, search_terms))
+                continue
+            items, _ = _parse_listing_alerts(r.text, r.url, _normalize_terms(search_terms), f'{name}_listing')
+            partial = _extract_alert_candidates_from_text(r.text, f'{name}_text_probe', registro, search_terms)
+            all_alerts.extend([_enrich_alert(a, f'{name}_listing', 'high', registro) for a in items])
+            partial_pool.extend(partial)
+            _record_attempt(attempts, 'alternative_search', name, url, 'ok', None, len(items) + len(partial))
+        except Exception as exc:
+            st = _classify_request_failure(exc)
+            _record_attempt(attempts, 'alternative_search', name, url, st, str(exc))
+            error_details.append(str(exc))
 
-    govbr_partial_alerts, govbr_status, govbr_details = _layer_govbr_search_fallback(session, registro, search_terms)
-    sources.append({
-        'name': 'govbr_search_fallback',
-        'url': GOVBR_SEARCH_URL,
-        'status': 'ok' if govbr_status is None else govbr_status,
-        'details': govbr_details,
-    })
+    # cache/index on official data already fetched
+    cache = _load_cached_index()
+    if cache is None:
+        entries = _index_entries_from_alerts(listing_alerts)
+        if entries:
+            _save_cached_index(entries)
+        cache = {'entries': entries}
+        _record_attempt(attempts, 'alternative_search', 'official_index_cache_refresh', str(INDEX_CACHE_FILE), 'ok', None, len(entries))
+    indexed = _search_in_index(registro, search_terms, cache.get('entries', []))
+    if indexed:
+        all_alerts.extend(indexed)
+    _record_attempt(attempts, 'alternative_search', 'official_index_cache_lookup', str(INDEX_CACHE_FILE), 'ok', None, len(indexed))
 
-    community_alerts, community_status, community_details = _layer_community_registry_lookup(session, registro)
-    sources.append({
-        'name': 'community_registry_lookup',
-        'url': COMMUNITY_REGISTRY_LOOKUP_URL.format(registro=registro),
-        'status': 'ok' if community_status is None else community_status,
-        'details': community_details,
-    })
+    # 3) partial_identifier (força números mesmo sem título/link oficial)
+    partial_numbers = {str(a.get('numero_alerta')) for a in partial_pool if a.get('numero_alerta')}
+    numbered_from_full = {str(a.get('numero_alerta')) for a in all_alerts if a.get('numero_alerta')}
+    missing_numbers = [n for n in partial_numbers if n and n not in numbered_from_full]
+    partial_from_numbers = [_enrich_alert({'numero_alerta': n, 'origem_da_descoberta': 'partial_identifier_numbers_only'}, 'partial_identifier_numbers_only', 'medium', registro) for n in sorted(missing_numbers)]
+    _record_attempt(attempts, 'partial_identifier', 'textual_number_extraction', 'in-memory', 'ok', None, len(partial_from_numbers))
 
-    indexed_entries = _load_cached_index()
-    index_source = 'cache'
-    if indexed_entries is None:
-        built_entries = _index_entries_from_alerts(listing_alerts)
-        if built_entries:
-            _save_cached_index(built_entries)
-        indexed_entries = {'entries': built_entries}
-        index_source = 'fresh_scan'
+    # 4) external_fallback (contingência opcional para utilidade prática)
+    external_alerts: list[dict[str, Any]] = []
+    try:
+        external_url = COMMUNITY_REGISTRY_LOOKUP_URL.format(registro=registro)
+        r = session.get(external_url, timeout=REQUEST_TIMEOUT, verify=SSL_VERIFY, allow_redirects=True)
+        if r.status_code >= 400:
+            st = _classify_http_status(r.status_code)
+            _record_attempt(attempts, 'external_fallback', 'community_registry_lookup', external_url, st, f'HTTP {r.status_code}')
+            error_details.append(f'community HTTP {r.status_code}')
+        else:
+            nums = _extract_alert_numbers_from_payload(r.text)
+            for num in nums:
+                external_alerts.append(_enrich_alert({'numero_alerta': num, 'origem_da_descoberta': 'external_fallback_community'}, 'external_fallback_community', 'medium', registro))
+            _record_attempt(attempts, 'external_fallback', 'community_registry_lookup', external_url, 'ok', None, len(external_alerts))
+    except Exception as exc:
+        st = _classify_request_failure(exc)
+        _record_attempt(attempts, 'external_fallback', 'community_registry_lookup', COMMUNITY_REGISTRY_LOOKUP_URL.format(registro=registro), st, str(exc))
+        error_details.append(str(exc))
 
-    textual_alerts = _layer_textual_search(listing_alerts, registro, search_terms)
-    cached_alerts = _search_in_index(registro, search_terms, indexed_entries.get('entries', []))
-    merged_alerts = _dedupe_alerts(
-        textual_alerts + cached_alerts + alt_alerts + govbr_partial_alerts + community_alerts
-    )
-
-    if merged_alerts:
-        has_official_links = any(a.get('link') or a.get('link_oficial') for a in merged_alerts)
-        has_alert_number = any(a.get('numero_alerta') or a.get('id') for a in merged_alerts)
-        confidence = 'high' if has_official_links and has_alert_number else 'medium'
-        source = 'listing_textual_scan' if textual_alerts else f'index_{index_source}'
-        if alt_alerts:
-            source = 'legacy_advanced_fallback'
-        if govbr_partial_alerts and not (textual_alerts or alt_alerts):
-            source = 'govbr_search_partial'
-        if community_alerts and not (textual_alerts or alt_alerts or govbr_partial_alerts):
-            source = 'community_registry_partial'
-        payload = _format_alerts_payload(merged_alerts, source, confidence)
-        status = STATUS_ALERTS_FOUND if has_official_links else STATUS_PARTIAL_RESULT
+    merged = _dedupe_alerts(all_alerts + partial_from_numbers + external_alerts)
+    if merged:
+        has_official = any(a.get('link_oficial') for a in merged)
+        status = STATUS_ALERTS_FOUND if has_official else STATUS_PARTIAL_RESULT
+        confidence = 'high' if has_official else 'medium'
+        payload = _final_payload(merged, 'layered_alert_discovery', confidence)
         return {
             **payload,
             'status': status,
-            'warning': _build_warning(status, listing_details or alt_details or govbr_details)
-            if status == STATUS_PARTIAL_RESULT
-            else None,
-            'manual_url': manual_links['listagem'],
+            'warning': _build_warning(status, '; '.join(error_details[:3])) if status == STATUS_PARTIAL_RESULT else None,
+            'manual_url': manual_links['principal'],
             'manual_links': manual_links,
-            'sources': sources,
+            'sources': attempts,
         }
 
-    blocked_statuses = [direct_status, listing_status, alt_status]
-    if all(status == STATUS_BLOCKED_SOURCE for status in blocked_statuses if status is not None):
-        return {
-            'count': 0,
-            'alert_ids': [],
-            'alerts': [],
-            'source': 'blocked_sources',
-            'confidence': 'low',
-            'status': STATUS_BLOCKED_SOURCE,
-            'warning': _build_warning(
-                STATUS_BLOCKED_SOURCE,
-                direct_details or listing_details or alt_details or govbr_details,
-            ),
-            'manual_url': manual_links['tecnovigilancia'],
-            'manual_links': manual_links,
-            'sources': sources,
-        }
-
-    if direct_status or listing_status or alt_status or govbr_status or community_status:
-        return {
-            'count': 0,
-            'alert_ids': [],
-            'alerts': [],
-            'source': 'layered_search',
-            'confidence': 'low',
-            'status': STATUS_MANUAL_VALIDATION_REQUIRED,
-            'warning': _build_warning(
-                STATUS_MANUAL_VALIDATION_REQUIRED,
-                direct_details or listing_details or alt_details or govbr_details or community_details,
-            ),
-            'manual_url': manual_links['tecnovigilancia'],
-            'manual_links': manual_links,
-            'sources': sources,
-        }
+    if official_statuses and all(s == STATUS_BLOCKED_SOURCE for s in official_statuses):
+        status = STATUS_BLOCKED_SOURCE
+    elif error_details:
+        status = STATUS_MANUAL_VALIDATION_REQUIRED
+    else:
+        status = STATUS_NO_ALERTS_FOUND
 
     return {
-        'count': 0,
-        'alert_ids': [],
-        'alerts': [],
-        'source': 'layered_search',
-        'confidence': 'medium',
-        'status': STATUS_NO_ALERTS_FOUND,
-        'warning': None,
-        'manual_url': manual_links['principal'],
+        **_final_payload([], 'layered_alert_discovery', 'low' if status != STATUS_NO_ALERTS_FOUND else 'medium'),
+        'status': status,
+        'warning': _build_warning(status, '; '.join(error_details[:3])) if status != STATUS_NO_ALERTS_FOUND else None,
+        'manual_url': manual_links['tecnovigilancia'],
         'manual_links': manual_links,
-        'sources': sources,
+        'sources': attempts,
     }
