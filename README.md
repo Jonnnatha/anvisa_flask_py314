@@ -1,73 +1,63 @@
 # Consulta Regulatória ANVISA (Flask + Python 3.14)
 
-Sistema web para consulta por **número de registro ANVISA (11 dígitos)** com foco em estabilidade no Python 3.14.
+Aplicação web para consulta por **número de registro ANVISA (11 dígitos)** com resposta separada em três blocos:
 
-## O que o sistema faz
+1. **Dados do produto** (API oficial da ANVISA)
+2. **Alertas** (fonte externa de apoio)
+3. **Reclamações / sinais públicos relacionados** (busca pública com filtro de relevância)
 
-1. Consulta dados do produto de saúde via **API oficial da Anvisa** (`POST /consulta/saude`) com autenticação OAuth2 Client Credentials.
-2. Mantém a consulta de alertas em **módulo isolado**, com estratégia de fallback/assistida quando há bloqueio das fontes (HTTP 403).
-3. Exibe no frontend, de forma separada, o resultado do produto (API oficial) e o status da busca de alertas.
-
-> Importante: a integração oficial implementada nesta refatoração cobre **consulta de produtos de saúde**. A camada de alertas continua independente e não assume API oficial para tecnovigilância sem evidência.
-
-## Stack escolhida
-
-- **Backend:** Flask 3.1
-- **HTTP:** requests
-- **Parse HTML (alertas):** BeautifulSoup4
-- **Frontend:** HTML/CSS/JS puro
-
-## Estrutura
+## Arquitetura de serviços
 
 ```text
-app/
-  __init__.py
-  __main__.py
-  app.py
-  routes.py
-  core/
-    config.py              # env vars + carregamento opcional de .env
-  services/
-    anvisa_auth.py         # OAuth2 client credentials + cache de token em memória
-    product_service.py     # integração API oficial de produto + normalização
-    alerts_service.py      # consulta de alertas isolada + fallback assistido
-    search_service.py      # orquestra produto + alertas mantendo separação lógica
-  templates/
-    index.html
-  static/
-    css/style.css
-    js/app.js
-.env.example               # variáveis para API oficial
+app/services/
+  anvisa_auth.py      # autenticação OAuth2 da API oficial
+  product_service.py  # POST /consulta/saude com filter.numeroRegistro
+  alerts_service.py   # consulta em https://brunoroma.pythonanywhere.com/registro/<registro>
+  signals_service.py  # busca pública com validação de relevância
+  search_service.py   # consolida resposta final para o frontend
 ```
 
-## Requisitos
+## Regras implementadas
 
-- Python 3.14
-- pip
+### 1) Dados do produto (API oficial)
 
-## Como rodar
+- Consulta oficial em `POST /consulta/saude`.
+- Filtro utilizado: `filter.numeroRegistro`.
+- Normalização apenas com campos coerentes com o retorno oficial:
+  - `numeroRegistro`
+  - `nomeProduto`
+  - `numeroProcesso`
+  - `situacaoNotificacaoRegistro`
+  - `nomeTecnico`
+  - `empresa.razaoSocial`
+  - `empresa.cnpj`
 
-### Linux/macOS
+### 2) Alertas (fonte externa de apoio)
+
+- Endpoint: `https://brunoroma.pythonanywhere.com/registro/<REGISTRO_ANVISA>`.
+- Parsing dos números de alerta no formato textual retornado.
+- Estrutura de cada alerta:
+  - `numero_alerta`
+  - `link_pesquisa_manual`
+  - `origem_da_descoberta`
+  - `nivel_confianca`
+- A interface destaca que **não é fonte oficial da ANVISA**.
+
+### 3) Reclamações / sinais públicos relacionados
+
+- Coleta apenas resultados públicos com filtro rígido de relevância.
+- Só mantém itens com relação concreta por termos do produto/registro.
+- Se não houver evidência forte, a seção fica vazia com mensagem honesta:
+  - **“Nenhuma reclamação pública relevante foi encontrada.”**
+
+## Execução
 
 ```bash
 python -m venv .venv
 source .venv/bin/activate
-python -m pip install --upgrade pip
 pip install -r requirements.txt
 cp .env.example .env
-# edite .env com as credenciais ANVISA
-python -m app
-```
-
-### Windows PowerShell
-
-```powershell
-python -m venv .venv
-.\.venv\Scripts\Activate.ps1
-python -m pip install --upgrade pip
-pip install -r requirements.txt
-Copy-Item .env.example .env
-# edite .env com as credenciais ANVISA
+# configure credenciais ANVISA no .env
 python -m app
 ```
 
@@ -75,72 +65,39 @@ Abra: `http://127.0.0.1:5000`
 
 ## Variáveis de ambiente
 
-Obrigatórias para produto (API oficial):
+Obrigatórias para API oficial de produto:
 
 - `ANVISA_AUTH_CLIENT_ID`
 - `ANVISA_AUTH_CLIENT_SECRET`
 
-Recomendadas:
+Principais opcionais:
 
-- `ANVISA_AUTH_TOKEN_URL` (default oficial)
-- `ANVISA_AUTH_SCOPE` (default `openid`)
-- `ANVISA_PRODUCT_API_URL` (default oficial `.../consulta/saude`)
-- `REQUEST_TIMEOUT` (default `30`)
-- `SSL_VERIFY` (default `true`)
+- `ANVISA_AUTH_TOKEN_URL`
+- `ANVISA_AUTH_SCOPE`
+- `ANVISA_PRODUCT_API_URL`
+- `REQUEST_TIMEOUT`
+- `SSL_VERIFY`
+- `EXTERNAL_ALERT_LOOKUP_BASE_URL` (default `https://brunoroma.pythonanywhere.com`)
 
-## Fluxo de autenticação e consulta
+## Endpoint da aplicação
 
-1. Serviço `anvisa_auth.py` solicita token no endpoint oficial com `application/x-www-form-urlencoded`:
-   - `grant_type=client_credentials`
-   - `client_id`
-   - `client_secret`
-   - `scope=openid`
-2. O token é cacheado em memória usando `expires_in` com margem de segurança.
-3. Serviço de produto envia `Authorization: Bearer <token>` para `POST /consulta/saude`.
-4. Payload inclui:
-   - `count`
-   - `page`
-   - `order`
-   - `sorting`
-   - `filter.numeroRegistro`
-5. Resposta oficial é normalizada para o formato já consumido pelo frontend.
+- `GET /api/consultar?registro=80146502070`
 
-## Estratégia de tratamento de erros (produto)
-
-A camada de produto trata explicitamente:
-
-- credenciais ausentes;
-- falha ao obter token;
-- token expirado/inválido (com tentativa automática de renovar 1x);
-- resposta vazia/inválida;
-- registro não encontrado;
-- falhas temporárias da API (rede e `5xx`);
-- rate limit (`429`).
-
-## Endpoint API
-
-- `GET /api/consultar?registro=10349000912`
-
-Exemplo resumido de retorno:
+Resposta (resumo):
 
 ```json
 {
-  "registro_anvisa": "10349000912",
+  "registro_anvisa": "80146502070",
   "found": true,
-  "product": {
-    "registro_anvisa": "10349000912",
-    "nome_produto": "..."
-  },
-  "alerts_status": "anti_bot_block",
-  "alerts_warning": "Fonte oficial bloqueou automação...",
-  "alerts_manual_links": {
-    "tecnovigilancia": "https://www.gov.br/anvisa/..."
-  }
+  "product": { "numeroRegistro": "80146502070", "nomeProduto": "..." },
+  "alerts": [
+    {
+      "numero_alerta": "4412",
+      "link_pesquisa_manual": "https://www.gov.br/anvisa/pt-br/search?...",
+      "origem_da_descoberta": "Fonte externa de apoio: brunoroma.pythonanywhere.com",
+      "nivel_confianca": "medio"
+    }
+  ],
+  "complaints_or_signals": []
 }
 ```
-
-## Limitações reais (alertas)
-
-- Fontes de alertas podem bloquear automação (HTTP 403).
-- Por isso, a aplicação preserva fallback e **modo assistido** sem quebrar a consulta de produto.
-- Resultados de sinais públicos/web não equivalem a validação oficial automática.

@@ -96,7 +96,6 @@ def call_official_product_api(payload: dict[str, Any]) -> dict[str, Any]:
     status_code = int(result['status_code'])
     response = result['response']
 
-    # Se token expirar no meio da sessão, invalida cache e tenta uma única vez.
     if status_code in (401, 403):
         invalidate_cached_token()
         try:
@@ -123,42 +122,40 @@ def call_official_product_api(payload: dict[str, Any]) -> dict[str, Any]:
     return body
 
 
+def _get_nested(item: dict[str, Any], key: str) -> Any:
+    value = item.get(key)
+    if isinstance(value, dict):
+        return value
+    return {}
+
+
 def normalize_product_response(response_data: dict[str, Any], registro: str) -> dict[str, Any] | None:
     items = _extract_items(response_data)
     if not items:
-        if any(k in response_data for k in ('numeroRegistro', 'nomeProduto', 'processo')):
-            items = [response_data]
-        else:
-            return None
+        return None
 
     normalized_registro = _normalize_registration(registro)
     selected = None
     for item in items:
-        candidate = _normalize_registration(str(item.get('numeroRegistro') or item.get('registro') or ''))
+        candidate = _normalize_registration(str(item.get('numeroRegistro') or ''))
         if candidate == normalized_registro:
             selected = item
             break
 
     item = selected or items[0]
-
-    def pick(*keys: str) -> str:
-        for key in keys:
-            value = item.get(key)
-            if value is not None and str(value).strip():
-                return str(value).strip()
-        return ''
+    empresa = _get_nested(item, 'empresa')
+    nome_tecnico = item.get('nomeTecnico')
 
     return {
-        'registro_anvisa': pick('numeroRegistro', 'registro', 'cadastro') or normalized_registro,
-        'nome_produto': pick('nomeProduto', 'produto', 'nomeComercial'),
-        'marca': pick('marca', 'nomeMarca'),
-        'modelo': pick('modelo', 'nomeModelo'),
-        'fabricante': pick('fabricante', 'razaoSocialFabricante'),
-        'detentor_registro': pick('detentorRegistro', 'razaoSocialDetentorRegistro'),
-        'pais_fabricacao': pick('paisFabricacao', 'nomePaisFabricacao'),
-        'situacao': pick('situacao', 'situacaoRegistro'),
-        'processo': pick('numeroProcesso', 'processo'),
-        'classificacao_risco': pick('classeRisco', 'classificacaoRisco'),
+        'numeroRegistro': str(item.get('numeroRegistro') or normalized_registro),
+        'nomeProduto': str(item.get('nomeProduto') or '').strip(),
+        'numeroProcesso': str(item.get('numeroProcesso') or '').strip(),
+        'situacaoNotificacaoRegistro': str(item.get('situacaoNotificacaoRegistro') or '').strip(),
+        'nomeTecnico': str(nome_tecnico or '').strip(),
+        'empresa': {
+            'razaoSocial': str(empresa.get('razaoSocial') or '').strip(),
+            'cnpj': str(empresa.get('cnpj') or '').strip(),
+        },
     }
 
 

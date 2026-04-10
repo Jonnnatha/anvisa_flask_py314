@@ -3,7 +3,7 @@ from __future__ import annotations
 import re
 from typing import Any
 
-from app.core.config import ALERTS_PAGE_URL, PRODUCTS_PAGE_URL
+from app.core.config import ANVISA_PRODUCT_API_URL, EXTERNAL_ALERT_LOOKUP_BASE_URL
 from app.services.alerts_service import find_alerts_by_registration
 from app.services.product_service import (
     ProductAuthenticationError,
@@ -12,6 +12,7 @@ from app.services.product_service import (
     ProductRateLimitError,
     find_product_by_registration,
 )
+from app.services.signals_service import find_related_public_signals
 
 
 def validate_registration(value: str) -> str:
@@ -21,87 +22,66 @@ def validate_registration(value: str) -> str:
     return registro
 
 
-def _product_error_response(registro: str, message: str, status: str) -> dict[str, Any]:
+def _build_base_response(registro: str) -> dict[str, Any]:
     return {
         'registro_anvisa': registro,
         'found': False,
-        'source_product': PRODUCTS_PAGE_URL,
-        'source_alerts': ALERTS_PAGE_URL,
-        'source_alerts_fallback': 'https://www.gov.br/anvisa/pt-br/assuntos/fiscalizacao-e-monitoramento/tecnovigilancia/alertas-de-tecnovigilancia-1',
+        'origens': {
+            'produto': 'API oficial ANVISA (POST /consulta/saude)',
+            'alertas': f'Fonte externa de apoio ({EXTERNAL_ALERT_LOOKUP_BASE_URL.rstrip("/")})',
+            'sinais_publicos': 'Busca pública em gov.br/anvisa com filtro de relevância',
+        },
         'product': None,
         'alerts_count': 0,
         'alerts': [],
-        'alerts_warning': 'Consulta de alertas não executada: produto indisponível.',
-        'alerts_manual_url': f'{ALERTS_PAGE_URL}?tagsName={registro}',
         'complaints_or_signals': [],
-        'search_status': {'overall': status, 'web_search_used': False},
-        'sources_checked': [],
-        'warnings': [message],
-        'message': message,
     }
 
 
 def search_by_registration(value: str) -> dict[str, Any]:
     registro = validate_registration(value)
+    result = _build_base_response(registro)
 
     try:
         product = find_product_by_registration(registro)
     except ProductAuthenticationError as exc:
-        return _product_error_response(registro, str(exc), 'product_auth_error')
+        result['message'] = str(exc)
+        result['error_code'] = 'product_auth_error'
+        return result
     except ProductRateLimitError as exc:
-        return _product_error_response(registro, str(exc), 'product_rate_limit')
+        result['message'] = str(exc)
+        result['error_code'] = 'product_rate_limit'
+        return result
     except ProductEmptyResponseError as exc:
-        return _product_error_response(registro, str(exc), 'product_empty_response')
+        result['message'] = str(exc)
+        result['error_code'] = 'product_empty_response'
+        return result
     except ProductLookupError as exc:
-        return _product_error_response(registro, str(exc), 'product_lookup_error')
+        result['message'] = str(exc)
+        result['error_code'] = 'product_lookup_error'
+        return result
 
     if not product:
-        return {
-            'registro_anvisa': registro,
-            'found': False,
-            'source_product': PRODUCTS_PAGE_URL,
-            'source_alerts': ALERTS_PAGE_URL,
-            'source_alerts_fallback': 'https://www.gov.br/anvisa/pt-br/assuntos/fiscalizacao-e-monitoramento/tecnovigilancia/alertas-de-tecnovigilancia-1',
-            'product': None,
-            'alerts_count': 0,
-            'alerts': [],
-            'alerts_warning': None,
-            'alerts_manual_url': f'{ALERTS_PAGE_URL}?tagsName={registro}',
-            'complaints_or_signals': [],
-            'search_status': {'overall': 'product_not_found', 'web_search_used': False},
-            'sources_checked': [],
-            'warnings': [],
-            'message': 'Registro não encontrado na API oficial de produtos para saúde da Anvisa.',
+        result['message'] = 'Registro não encontrado na API oficial de produtos para saúde da Anvisa.'
+        return result
+
+    alerts_result = find_alerts_by_registration(registro)
+    signals_result = find_related_public_signals(registro, product=product)
+
+    result.update(
+        {
+            'found': True,
+            'message': 'Consulta realizada com sucesso.',
+            'source_product': ANVISA_PRODUCT_API_URL,
+            'product': product,
+            'alerts_count': alerts_result.get('count', 0),
+            'alerts_status': alerts_result.get('status'),
+            'alerts_source': alerts_result.get('source'),
+            'alerts_warning': alerts_result.get('warning'),
+            'alerts': alerts_result.get('alerts', []),
+            'complaints_or_signals': signals_result.get('items', []),
+            'signals_warning': signals_result.get('warning'),
+            'signals_source': signals_result.get('source'),
         }
-
-    alert_result = find_alerts_by_registration(registro, product=product)
-    alerts = alert_result.get('alerts', [])
-
-    return {
-        'registro_anvisa': registro,
-        'found': True,
-        'source_product': PRODUCTS_PAGE_URL,
-        'source_alerts': ALERTS_PAGE_URL,
-        'source_alerts_fallback': 'https://www.gov.br/anvisa/pt-br/assuntos/fiscalizacao-e-monitoramento/tecnovigilancia/alertas-de-tecnovigilancia-1',
-        'product': product,
-        'alerts_count': alert_result.get('count', len(alerts)),
-        'alerts': alerts,
-        'alerts_result': {
-            'count': alert_result.get('count', len(alerts)),
-            'alert_ids': alert_result.get('alert_ids', []),
-            'source': alert_result.get('source'),
-            'confidence': alert_result.get('confidence'),
-        },
-        'alerts_status': alert_result.get('status'),
-        'alerts_warning': alert_result.get('warning'),
-        'alerts_sources': alert_result.get('sources', []),
-        'alerts_strategy_log': alert_result.get('sources', []),
-        'sources_checked': alert_result.get('sources_checked', alert_result.get('sources', [])),
-        'alerts_reference_links': alert_result.get('reference_links', []),
-        'alerts_manual_url': alert_result.get('manual_url'),
-        'alerts_manual_links': alert_result.get('manual_links', {}),
-        'complaints_or_signals': alert_result.get('complaints_or_signals', []),
-        'search_status': alert_result.get('search_status', {'overall': alert_result.get('status')}),
-        'warnings': alert_result.get('warnings', []),
-        'message': 'Registro encontrado via API oficial da Anvisa.' if not alerts else 'Registro encontrado via API oficial da Anvisa e alertas localizados.',
-    }
+    )
+    return result
