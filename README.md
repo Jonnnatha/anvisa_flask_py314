@@ -4,7 +4,7 @@ Sistema web para consulta por **número de registro ANVISA (11 dígitos)** com f
 
 ## O que o sistema faz
 
-1. Consulta dados do produto de saúde via **API oficial da Anvisa** (`POST /consulta/saude`) usando `filter.numeroRegistro`.
+1. Consulta dados do produto de saúde via **API oficial da Anvisa** (`POST /consulta/saude`) com autenticação OAuth2 Client Credentials.
 2. Mantém a consulta de alertas em **módulo isolado**, com estratégia de fallback/assistida quando há bloqueio das fontes (HTTP 403).
 3. Exibe no frontend, de forma separada, o resultado do produto (API oficial) e o status da busca de alertas.
 
@@ -28,7 +28,8 @@ app/
   core/
     config.py              # env vars + carregamento opcional de .env
   services/
-    product_service.py     # integração API oficial de produto
+    anvisa_auth.py         # OAuth2 client credentials + cache de token em memória
+    product_service.py     # integração API oficial de produto + normalização
     alerts_service.py      # consulta de alertas isolada + fallback assistido
     search_service.py      # orquestra produto + alertas mantendo separação lógica
   templates/
@@ -54,7 +55,7 @@ source .venv/bin/activate
 python -m pip install --upgrade pip
 pip install -r requirements.txt
 cp .env.example .env
-# edite .env e preencha ANVISA_API_TOKEN
+# edite .env com as credenciais ANVISA
 python -m app
 ```
 
@@ -66,7 +67,7 @@ python -m venv .venv
 python -m pip install --upgrade pip
 pip install -r requirements.txt
 Copy-Item .env.example .env
-# edite .env e preencha ANVISA_API_TOKEN
+# edite .env com as credenciais ANVISA
 python -m app
 ```
 
@@ -76,27 +77,45 @@ Abra: `http://127.0.0.1:5000`
 
 Obrigatórias para produto (API oficial):
 
-- `ANVISA_API_TOKEN`: token Bearer da API oficial.
-- `ANVISA_API_BASE_URL`: base da API oficial (default: `https://consultas.anvisa.gov.br/api`).
+- `ANVISA_AUTH_CLIENT_ID`
+- `ANVISA_AUTH_CLIENT_SECRET`
 
-Opcionais:
+Recomendadas:
 
+- `ANVISA_AUTH_TOKEN_URL` (default oficial)
+- `ANVISA_AUTH_SCOPE` (default `openid`)
+- `ANVISA_PRODUCT_API_URL` (default oficial `.../consulta/saude`)
 - `REQUEST_TIMEOUT` (default `30`)
-- `SSL_VERIFY` (default `false`)
-- `ANVISA_USER_AGENT`
-- `ENABLE_EXTERNAL_ALERT_FALLBACK` (default `true`)
-- `EXTERNAL_ALERT_LOOKUP_BASE_URL`
+- `SSL_VERIFY` (default `true`)
 
-> Nunca hardcode token no código. Use sempre variável de ambiente.
+## Fluxo de autenticação e consulta
+
+1. Serviço `anvisa_auth.py` solicita token no endpoint oficial com `application/x-www-form-urlencoded`:
+   - `grant_type=client_credentials`
+   - `client_id`
+   - `client_secret`
+   - `scope=openid`
+2. O token é cacheado em memória usando `expires_in` com margem de segurança.
+3. Serviço de produto envia `Authorization: Bearer <token>` para `POST /consulta/saude`.
+4. Payload inclui:
+   - `count`
+   - `page`
+   - `order`
+   - `sorting`
+   - `filter.numeroRegistro`
+5. Resposta oficial é normalizada para o formato já consumido pelo frontend.
 
 ## Estratégia de tratamento de erros (produto)
 
 A camada de produto trata explicitamente:
 
-- erro de autenticação (`401/403`) → token ausente/inválido/expirado;
-- rate limit (`429`) → limite excedido na API;
-- resposta vazia ou inválida → retorno inconclusivo da API;
-- falhas de rede/HTTP genéricas.
+- credenciais ausentes;
+- falha ao obter token;
+- token expirado/inválido (com tentativa automática de renovar 1x);
+- resposta vazia/inválida;
+- registro não encontrado;
+- falhas temporárias da API (rede e `5xx`);
+- rate limit (`429`).
 
 ## Endpoint API
 
