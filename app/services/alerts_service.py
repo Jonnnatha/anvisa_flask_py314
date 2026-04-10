@@ -177,6 +177,32 @@ def _parse_google_result_links(html: str) -> list[dict[str, str]]:
     links: list[dict[str, str]] = []
     seen: set[str] = set()
 
+    # Estrutura preferencial dos resultados orgânicos.
+    for result in soup.select('div.g'):
+        anchor = result.select_one('a[href^="/url?q="]')
+        if not anchor:
+            continue
+
+        href = anchor.get('href') or ''
+        parsed = urlparse(href)
+        target = parse_qs(parsed.query).get('q', [None])[0]
+        if not target or target in seen:
+            continue
+
+        title_node = result.select_one('h3') or anchor
+        title = title_node.get_text(' ', strip=True)
+        if not title or 'google' in target.lower():
+            continue
+
+        snippet_node = result.select_one('div.VwiC3b, div[data-sncf="1"], span.aCOpRe, div.IsZvec')
+        snippet = snippet_node.get_text(' ', strip=True) if snippet_node else ''
+
+        seen.add(target)
+        links.append({'title': title[:220], 'summary': snippet[:400], 'link': target})
+        if len(links) >= MAX_WEB_RESULTS_PER_QUERY:
+            return links
+
+    # Fallback para layouts simplificados/bloqueados sem os contêineres "div.g".
     for anchor in soup.select('a[href^="/url?q="]'):
         href = anchor.get('href') or ''
         parsed = urlparse(href)
@@ -187,9 +213,10 @@ def _parse_google_result_links(html: str) -> list[dict[str, str]]:
         if not title or 'google' in target.lower():
             continue
         seen.add(target)
-        links.append({'title': title[:220], 'link': target})
+        links.append({'title': title[:220], 'summary': '', 'link': target})
         if len(links) >= MAX_WEB_RESULTS_PER_QUERY:
             break
+
     return links
 
 
@@ -224,6 +251,19 @@ def _confidence_for_signal(url: str, title: str, snippet: str) -> str:
     if any(term in content for term in ('recall', 'alerta', 'ação de campo', 'queixa técnica')):
         return 'medium'
     return 'low'
+
+
+def _is_relevant_result(registro: str, terms: list[str], title: str, summary: str, link: str) -> bool:
+    content = f'{title} {summary}'.lower()
+    registro_norm = (registro or '').strip().lower()
+    text_terms = [t.lower() for t in terms[1:] if t]
+    if registro_norm and registro_norm in content:
+        return True
+    if any(term in content for term in text_terms):
+        return True
+    if 'gov.br' in _extract_domain(link) and 'anvisa' in content:
+        return True
+    return False
 
 
 def _build_complaint_signal(result: dict[str, Any], origin: str) -> dict[str, Any]:
@@ -493,7 +533,7 @@ def _run_web_discovery(
                     seen_links.add(link)
                     summary = item.get('summary') or title
                     combined = f'{title} {summary}'
-                    if registro not in combined and not any(term.lower() in combined.lower() for term in terms[1:]):
+                    if not _is_relevant_result(registro, terms, title, summary, link):
                         continue
 
                     origin = f'web_search.{source_name}'
