@@ -27,9 +27,20 @@ _load_local_env()
 PRODUCT_CACHE_FILE = DATA_DIR / 'anvisa_products.csv'
 PRODUCT_CACHE_TTL_HOURS = int(os.getenv('PRODUCT_CACHE_TTL_HOURS', '24'))
 
-ANVISA_API_BASE_URL = os.getenv('ANVISA_API_BASE_URL', 'https://consultas.anvisa.gov.br/api')
-ANVISA_API_TOKEN = os.getenv('ANVISA_API_TOKEN', '')
-PRODUCTS_PAGE_URL = f"{ANVISA_API_BASE_URL.rstrip('/')}/consulta/saude"
+ANVISA_AUTH_TOKEN_URL = os.getenv(
+    'ANVISA_AUTH_TOKEN_URL',
+    'https://acesso.prd.apps.anvisa.gov.br/auth/realms/externo/protocol/openid-connect/token',
+)
+ANVISA_AUTH_CLIENT_ID = os.getenv('ANVISA_AUTH_CLIENT_ID', '')
+ANVISA_AUTH_CLIENT_SECRET = os.getenv('ANVISA_AUTH_CLIENT_SECRET', '')
+ANVISA_AUTH_SCOPE = os.getenv('ANVISA_AUTH_SCOPE', 'openid')
+
+ANVISA_PRODUCT_API_URL = os.getenv(
+    'ANVISA_PRODUCT_API_URL',
+    'https://api-gateway.prd.apps.anvisa.gov.br/consultas-externas-api/api/v1/consulta/saude',
+)
+ANVISA_API_BASE_URL = os.getenv('ANVISA_API_BASE_URL', 'https://api-gateway.prd.apps.anvisa.gov.br/consultas-externas-api/api/v1')
+PRODUCTS_PAGE_URL = ANVISA_PRODUCT_API_URL
 ALERTS_PAGE_URL = 'https://antigo.anvisa.gov.br/alertas'
 
 REQUEST_TIMEOUT = int(os.getenv('REQUEST_TIMEOUT', '30'))
@@ -39,9 +50,7 @@ USER_AGENT = os.getenv(
     '(KHTML, like Gecko) Chrome/123.0 Safari/537.36',
 )
 
-# Em ambiente local alguns endpoints antigos da Anvisa falham em SSL.
-# Mantemos valor padrão False para não quebrar a experiência local.
-SSL_VERIFY = os.getenv('SSL_VERIFY', 'false').lower() in ('1', 'true', 'yes')
+SSL_VERIFY = os.getenv('SSL_VERIFY', 'true').lower() in ('1', 'true', 'yes')
 
 ENABLE_EXTERNAL_ALERT_FALLBACK = os.getenv('ENABLE_EXTERNAL_ALERT_FALLBACK', 'true').lower() in ('1', 'true', 'yes')
 EXTERNAL_ALERT_LOOKUP_BASE_URL = os.getenv('EXTERNAL_ALERT_LOOKUP_BASE_URL', 'https://brunoroma.pythonanywhere.com')
