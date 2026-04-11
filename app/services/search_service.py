@@ -6,6 +6,7 @@ from typing import Any
 from app.core.config import ANVISA_PRODUCT_API_URL
 from app.services.alerts_service import find_alerts_by_registration
 from app.services.materials_service import find_related_materials
+from app.services.product_enrichment_service import enrich_product_data
 from app.services.product_service import (
     ProductAuthenticationError,
     ProductEmptyResponseError,
@@ -28,10 +29,13 @@ def _build_base_response(registro: str) -> dict[str, Any]:
         'found': False,
         'origens': {
             'produto': 'API oficial ANVISA (POST /consulta/saude)',
+            'enriquecimento': 'Camada de enriquecimento baseada em dados oficiais + base local indexada',
             'alertas': 'Base local indexada de alertas da Anvisa (coleta estruturada)',
-            'materiais': 'Busca pública em gov.br/anvisa guiada por dados reais do produto',
+            'materiais': 'Busca pública guiada por contexto real do produto (gov.br/anvisa)',
         },
         'product': None,
+        'official_data': {},
+        'enriched_data': {},
         'alerts_count': 0,
         'alerts': [],
         'materials_or_signals': [],
@@ -66,6 +70,7 @@ def search_by_registration(value: str) -> dict[str, Any]:
         return result
 
     alerts_result = find_alerts_by_registration(registro)
+    enrichment_result = enrich_product_data(product, alerts=alerts_result.get('alerts', []))
     materials_result = find_related_materials(registro, product=product)
 
     result.update(
@@ -74,6 +79,8 @@ def search_by_registration(value: str) -> dict[str, Any]:
             'message': 'Consulta realizada com sucesso.',
             'source_product': ANVISA_PRODUCT_API_URL,
             'product': product,
+            'official_data': enrichment_result.get('official_data', product),
+            'enriched_data': enrichment_result.get('enriched_data', {}),
             'alerts_count': alerts_result.get('count', 0),
             'alerts_status': alerts_result.get('status'),
             'alerts_source': alerts_result.get('source'),

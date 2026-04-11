@@ -12,6 +12,7 @@ Aplicação web para consulta por **número de registro ANVISA (11 dígitos)** c
 app/services/
   anvisa_auth.py       # autenticação OAuth2 da API oficial
   product_service.py   # consulta oficial do produto
+  product_enrichment_service.py # enriquecimento de marca/modelo e sinais úteis
   alerts_collector.py  # coleta estruturada dos alertas da Anvisa
   alerts_index.py      # indexação por alerta/registro/empresa/produto/modelo
   alerts_service.py    # consulta da base local indexada
