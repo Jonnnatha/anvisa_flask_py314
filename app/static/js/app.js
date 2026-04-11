@@ -29,11 +29,6 @@ function field(label, value) {
   return `<div class="field"><span>${escapeHtml(label)}</span><strong>${escapeHtml(value)}</strong></div>`;
 }
 
-function alertField(label, value) {
-  if (!value || String(value).trim() === '') return '';
-  return `<p><strong>${escapeHtml(label)}:</strong> ${escapeHtml(value)}</p>`;
-}
-
 function listField(label, values) {
   if (!Array.isArray(values) || !values.length) return '';
   const clean = values.filter(item => String(item || '').trim());
@@ -41,36 +36,25 @@ function listField(label, values) {
   return `<div class="field"><span>${escapeHtml(label)}</span><strong>${escapeHtml(clean.join(' · '))}</strong></div>`;
 }
 
+function alertField(label, value) {
+  if (!value || String(value).trim() === '') return '';
+  return `<p><strong>${escapeHtml(label)}:</strong> ${escapeHtml(value)}</p>`;
+}
+
 function render(data) {
-  const official = data.official_data || data.product || {};
-  const company = official.empresa || {};
-  const enriched = data.enriched_data || {};
+  const productData = data.product_data || {};
+  const labels = productData.labels || {};
+  const fieldsOrder = productData.fields_order || [];
+  const payload = productData.data || {};
   const alerts = Array.isArray(data.alerts) ? data.alerts : [];
   const materials = Array.isArray(data.materials_or_signals) ? data.materials_or_signals : [];
 
-  const officialFields = [
-    field('Número do registro', official.numeroRegistro || data.registro_anvisa),
-    field('Nome comercial', official.nomeProduto),
-    field('Nome técnico', official.nomeTecnico),
-    field('Número do processo', official.numeroProcesso),
-    field('Situação do registro/notificação', official.situacaoNotificacaoRegistro),
-    field('Marca', official.marca),
-    field('Modelo', official.modelo),
-    field('Fabricante', official.fabricante),
-    field('Tipo de produto', official.tipoProduto),
-    field('Classe de risco', official.classeRisco),
-    field('Empresa (razão social)', company.razaoSocial),
-    field('Empresa (CNPJ)', company.cnpj)
-  ].filter(Boolean).join('');
-
-  const enrichedFields = [
-    field('Nome comercial (sugerido)', enriched.nome_comercial_sugerido),
-    field('Nome técnico (sugerido)', enriched.nome_tecnico_sugerido),
-    field('Fabricante (sugerido)', enriched.fabricante_sugerido),
-    field('Tipo de produto (sugerido)', enriched.tipo_produto_sugerido),
-    field('Classe de risco (sugerida)', enriched.classe_risco_sugerida),
-    listField('Modelos relacionados (evidência em alertas/documentos)', enriched.modelos_relacionados)
-  ].filter(Boolean).join('');
+  const productFields = fieldsOrder.map((key) => {
+    if (Array.isArray(payload[key])) {
+      return listField(labels[key] || key, payload[key]);
+    }
+    return field(labels[key] || key, payload[key]);
+  }).filter(Boolean).join('');
 
   const alertsHtml = alerts.length
     ? alerts.map(item => `
@@ -81,7 +65,10 @@ function render(data) {
         ${alertField('Identificação do produto ou caso', item.identificacao_produto_ou_caso)}
         ${alertField('Problema', item.problema)}
         ${alertField('Ação', item.acao)}
+        ${alertField('Referências', item.referencias)}
+        ${alertField('Histórico', item.historico)}
         ${alertField('Recomendações', item.recomendacoes)}
+        ${alertField('Informações complementares', item.informacoes_complementares)}
         ${alertField('Empresa', item.empresa)}
         ${alertField('Nome comercial', item.nome_comercial)}
         ${alertField('Nome técnico', item.nome_tecnico)}
@@ -109,24 +96,12 @@ function render(data) {
     ? data.materials_source.map(item => `<li><a href="${escapeHtml(item)}" target="_blank" rel="noopener noreferrer">${escapeHtml(item)}</a></li>`).join('')
     : '';
 
-  const enrichedBlock = enrichedFields
-    ? `
-      <div class="box">
-        <h2>Dados enriquecidos do produto</h2>
-        <p class="meta">Origem: ${escapeHtml(data.origens?.enriquecimento || '')}.</p>
-        <div class="grid">${enrichedFields}</div>
-      </div>
-    `
-    : '';
-
   resultado.innerHTML = `
     <div class="box">
-      <h2>Dados oficiais do produto</h2>
-      <p class="meta">Origem: ${escapeHtml(data.origens?.produto || 'API oficial ANVISA')}</p>
-      <div class="grid">${officialFields || '<p>Sem campos oficiais confiáveis para exibir.</p>'}</div>
+      <h2>Dados do produto</h2>
+      <p class="meta">Origem: ${escapeHtml(data.origens?.produto || '')} + ${escapeHtml(data.origens?.enriquecimento || '')}</p>
+      <div class="grid">${productFields || '<p>Sem campos confiáveis para exibir.</p>'}</div>
     </div>
-
-    ${enrichedBlock}
 
     <div class="box">
       <h2>Alertas (${alerts.length})</h2>
