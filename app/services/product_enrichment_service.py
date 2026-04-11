@@ -6,32 +6,81 @@ from typing import Any
 
 def _clean_text(value: Any) -> str:
     text = str(value or '').strip()
-    if not text:
-        return ''
-    if text in {'-', '--', 'N/A', 'n/a'}:
+    if not text or text in {'-', '--', 'N/A', 'n/a'}:
         return ''
     return text
 
 
-def _sanitize_model_tokens(raw: str) -> list[str]:
-    tokens = []
-    for piece in re.split(r'[;,|\n\r]+', raw or ''):
-        candidate = _clean_text(piece)
-        if not candidate:
-            continue
-        if len(candidate) < 2:
-            continue
-        tokens.append(candidate)
-    return tokens
-
-
 def _pick_from_dict(source: dict[str, Any], *keys: str) -> str:
     for key in keys:
-        value = source.get(key)
-        cleaned = _clean_text(value)
+        cleaned = _clean_text(source.get(key))
         if cleaned:
             return cleaned
     return ''
+
+
+def _normalize_key(value: str) -> str:
+    return re.sub(r'\s+', ' ', value.casefold()).strip()
+
+
+def _unique(values: list[str]) -> list[str]:
+    out: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        cleaned = _clean_text(value)
+        if not cleaned:
+            continue
+        key = _normalize_key(cleaned)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(cleaned)
+    return out
+
+
+def _extract_models(alerts: list[dict[str, Any]]) -> list[str]:
+    chunks: list[str] = []
+    for item in alerts:
+        raw = _clean_text(item.get('modelo_afetado'))
+        if raw:
+            chunks.extend(re.split(r'[;,|\n]+', raw))
+
+    candidates = [token.strip() for token in chunks if token.strip()]
+    strong = [token for token in candidates if len(token) >= 3 and re.search(r'[a-zA-Z]|\d', token)]
+    return _unique(strong)[:8]
+
+
+def build_consolidated_product_data(official_data: dict[str, Any], enriched_data: dict[str, Any]) -> dict[str, Any]:
+    ordered_fields = [
+        ('numero_registro', 'Número do registro'),
+        ('nome_produto', 'Nome do produto'),
+        ('marca', 'Marca'),
+        ('modelo', 'Modelo'),
+        ('fabricante', 'Fabricante / Empresa'),
+        ('nome_comercial', 'Nome comercial'),
+        ('nome_tecnico', 'Nome técnico'),
+        ('classe_risco', 'Classe de risco'),
+        ('tipo_produto', 'Tipo de produto'),
+        ('cnpj', 'CNPJ'),
+        ('numero_processo', 'Número do processo'),
+        ('situacao_registro', 'Situação do registro'),
+        ('modelos_relacionados', 'Modelos relacionados'),
+    ]
+
+    final_data: dict[str, Any] = {}
+    for key, _ in ordered_fields:
+        value = enriched_data.get(key)
+        if isinstance(value, list) and value:
+            final_data[key] = value
+        elif _clean_text(value):
+            final_data[key] = value
+
+    return {
+        'fields_order': [key for key, _ in ordered_fields if key in final_data],
+        'labels': {key: label for key, label in ordered_fields if key in final_data},
+        'data': final_data,
+        'official_data': official_data,
+    }
 
 
 def enrich_product_data(
@@ -39,102 +88,72 @@ def enrich_product_data(
     alerts: list[dict[str, Any]] | None = None,
     indexed_documents: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
-    """Monta camada de enriquecimento sem sobrescrever dados oficiais.
-
-    Regras:
-    - prioriza campos oficiais já existentes;
-    - usa alertas locais como reforço quando oficial está ausente;
-    - só retorna campos com evidência mínima;
-    - não usa placeholders.
-    """
-
     alerts = alerts or []
     indexed_documents = indexed_documents or []
 
     company = official_data.get('empresa') if isinstance(official_data.get('empresa'), dict) else {}
 
+    official_company = _pick_from_dict(company, 'razaoSocial')
     official_brand = _pick_from_dict(official_data, 'marca', 'nomeMarca')
     official_model = _pick_from_dict(official_data, 'modelo', 'nomeModelo')
     official_manufacturer = _pick_from_dict(official_data, 'fabricante', 'fabricanteLegal')
     official_nome_tecnico = _pick_from_dict(official_data, 'nomeTecnico')
     official_nome_comercial = _pick_from_dict(official_data, 'nomeProduto', 'nomeComercial')
-    official_company = _pick_from_dict(company, 'razaoSocial')
     official_tipo_produto = _pick_from_dict(official_data, 'tipoProduto')
     official_classe_risco = _pick_from_dict(official_data, 'classeRisco')
 
-    alert_companies = [_clean_text(item.get('empresa')) for item in alerts if _clean_text(item.get('empresa'))]
-    alert_commercial = [_clean_text(item.get('nome_comercial')) for item in alerts if _clean_text(item.get('nome_comercial'))]
-    alert_technical = [_clean_text(item.get('nome_tecnico')) for item in alerts if _clean_text(item.get('nome_tecnico'))]
-    alert_models_raw = [_clean_text(item.get('modelo_afetado')) for item in alerts if _clean_text(item.get('modelo_afetado'))]
-    alert_tipo_produto = [_clean_text(item.get('tipo_produto')) for item in alerts if _clean_text(item.get('tipo_produto'))]
-    alert_classe_risco = [_clean_text(item.get('classe_risco')) for item in alerts if _clean_text(item.get('classe_risco'))]
+    alert_brands = _unique([item.get('marca') for item in alerts])
+    alert_models = _extract_models(alerts)
+    alert_companies = _unique([item.get('empresa') for item in alerts])
+    alert_nome_comercial = _unique([item.get('nome_comercial') for item in alerts])
+    alert_nome_tecnico = _unique([item.get('nome_tecnico') for item in alerts])
+    alert_tipo = _unique([item.get('tipo_produto') for item in alerts])
+    alert_risco = _unique([item.get('classe_risco') for item in alerts])
 
-    document_models: list[str] = []
-    document_manufacturers: list[str] = []
-    for doc in indexed_documents:
-        if not isinstance(doc, dict):
-            continue
-        model = _clean_text(doc.get('modelo') or doc.get('model'))
-        manufacturer = _clean_text(doc.get('fabricante') or doc.get('manufacturer'))
-        if model:
-            document_models.append(model)
-        if manufacturer:
-            document_manufacturers.append(manufacturer)
+    doc_models = _unique([doc.get('modelo') or doc.get('model') for doc in indexed_documents if isinstance(doc, dict)])
+    doc_manufacturers = _unique([
+        doc.get('fabricante') or doc.get('manufacturer') for doc in indexed_documents if isinstance(doc, dict)
+    ])
 
-    derived_model_candidates: list[str] = []
-    for raw in alert_models_raw + document_models:
-        derived_model_candidates.extend(_sanitize_model_tokens(raw))
+    brand = official_brand or (alert_brands[0] if alert_brands else '')
+    model = official_model or (alert_models[0] if alert_models else '')
 
-    unique_models: list[str] = []
-    seen_models: set[str] = set()
-    for model in derived_model_candidates:
-        key = model.casefold()
-        if key in seen_models:
-            continue
-        seen_models.add(key)
-        unique_models.append(model)
+    manufacturer = official_manufacturer
+    if not manufacturer:
+        manufacturer_candidates = _unique([official_company, *alert_companies, *doc_manufacturers])
+        manufacturer = manufacturer_candidates[0] if manufacturer_candidates else ''
 
-    enriched: dict[str, Any] = {}
+    nome_comercial = official_nome_comercial or (alert_nome_comercial[0] if alert_nome_comercial else '')
+    if _normalize_key(nome_comercial) == _normalize_key(_pick_from_dict(official_data, 'nomeProduto')):
+        nome_comercial = ''
+    nome_tecnico = official_nome_tecnico or (alert_nome_tecnico[0] if alert_nome_tecnico else '')
+    tipo_produto = official_tipo_produto or (alert_tipo[0] if alert_tipo else '')
+    classe_risco = official_classe_risco or (alert_risco[0] if alert_risco else '')
 
-    if not official_brand:
-        # Marca só entra por evidência explícita em alerta/documento.
-        # Evita inferir marca a partir de empresa para não gerar falso positivo.
-        pass
+    base = {
+        'numero_registro': _pick_from_dict(official_data, 'numeroRegistro'),
+        'nome_produto': _pick_from_dict(official_data, 'nomeProduto'),
+        'marca': brand,
+        'modelo': model,
+        'fabricante': manufacturer,
+        'nome_comercial': nome_comercial,
+        'nome_tecnico': nome_tecnico,
+        'classe_risco': classe_risco,
+        'tipo_produto': tipo_produto,
+        'cnpj': _pick_from_dict(company, 'cnpj'),
+        'numero_processo': _pick_from_dict(official_data, 'numeroProcesso'),
+        'situacao_registro': _pick_from_dict(official_data, 'situacaoNotificacaoRegistro'),
+    }
 
-    if not official_model and unique_models:
-        enriched['modelos_relacionados'] = unique_models[:8]
+    if not model:
+        related_models = _unique([*alert_models, *doc_models])
+        if related_models:
+            base['modelos_relacionados'] = related_models
 
-    if not official_manufacturer:
-        for candidate in [official_company, *alert_companies, *document_manufacturers]:
-            if candidate:
-                enriched['fabricante_sugerido'] = candidate
-                break
-
-    if not official_nome_tecnico:
-        for candidate in alert_technical:
-            if candidate:
-                enriched['nome_tecnico_sugerido'] = candidate
-                break
-
-    if not official_nome_comercial:
-        for candidate in alert_commercial:
-            if candidate:
-                enriched['nome_comercial_sugerido'] = candidate
-                break
-
-    if not official_tipo_produto:
-        for candidate in alert_tipo_produto:
-            if candidate:
-                enriched['tipo_produto_sugerido'] = candidate
-                break
-
-    if not official_classe_risco:
-        for candidate in alert_classe_risco:
-            if candidate:
-                enriched['classe_risco_sugerida'] = candidate
-                break
+    consolidated = build_consolidated_product_data(official_data, base)
 
     return {
         'official_data': official_data,
-        'enriched_data': enriched,
+        'enriched_data': base,
+        'consolidated_product_data': consolidated,
     }

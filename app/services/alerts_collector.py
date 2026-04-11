@@ -1,11 +1,9 @@
 from __future__ import annotations
 
 import json
-import re
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
-from urllib.parse import urljoin
 
 import requests
 from bs4 import BeautifulSoup
@@ -21,30 +19,7 @@ from app.core.config import (
     USER_AGENT,
 )
 from app.services.alerts_index import build_alerts_index, save_index
-
-ALERT_NUMBER_RE = re.compile(r'\b(\d{3,6})\b')
-FIELD_MAP = {
-    'resumo': 'resumo',
-    'identificação do produto ou caso': 'identificacao_produto_ou_caso',
-    'identificacao do produto ou caso': 'identificacao_produto_ou_caso',
-    'problema': 'problema',
-    'ação': 'acao',
-    'acao': 'acao',
-    'recomendações': 'recomendacoes',
-    'recomendacoes': 'recomendacoes',
-}
-PRODUCT_KEYS = [
-    ('nome comercial', 'nome_comercial'),
-    ('nome técnico', 'nome_tecnico'),
-    ('nome tecnico', 'nome_tecnico'),
-    ('número de registro anvisa', 'numero_registro_anvisa'),
-    ('numero de registro anvisa', 'numero_registro_anvisa'),
-    ('tipo de produto', 'tipo_produto'),
-    ('classe de risco', 'classe_risco'),
-    ('modelo afetado', 'modelo_afetado'),
-    ('números de série afetados', 'numeros_serie_afetados'),
-    ('numeros de serie afetados', 'numeros_serie_afetados'),
-]
+from app.services.alerts_parser import parse_alert_detail, parse_alert_list_item
 
 
 def _iso_now() -> str:
@@ -58,108 +33,6 @@ def _parse_dt(value: str | None) -> datetime | None:
         return datetime.fromisoformat(value.replace('Z', '+00:00'))
     except ValueError:
         return None
-
-
-def _norm_heading(text: str) -> str:
-    clean = re.sub(r'[:;.!@#$%^&*()_+=<>?/\\\-\d]+', '', text or '').strip().lower()
-    return ' '.join(clean.split())
-
-
-def _extract_alert_number(text: str) -> str:
-    match = ALERT_NUMBER_RE.search(text or '')
-    return match.group(1) if match else ''
-
-
-def _extract_date(raw: str) -> str:
-    match = re.search(r'(\d{2}/\d{2}/\d{4})', raw or '')
-    return match.group(1) if match else ''
-
-
-def _first_text(node: Any, selector: str) -> str:
-    found = node.select_one(selector)
-    return found.get_text(' ', strip=True) if found else ''
-
-
-def _parse_product_identification_block(text: str) -> dict[str, str]:
-    result: dict[str, str] = {}
-    block = text or ''
-    block_l = block.casefold()
-
-    for idx, (key, target) in enumerate(PRODUCT_KEYS):
-        pos = block_l.find(key)
-        if pos < 0:
-            continue
-
-        start = pos + len(key)
-        while start < len(block) and block[start] in ': -\t\n':
-            start += 1
-
-        end = len(block)
-        for next_key, _ in PRODUCT_KEYS[idx + 1 :]:
-            next_pos = block_l.find(next_key, start)
-            if next_pos >= 0:
-                end = min(end, next_pos)
-
-        value = block[start:end].strip().strip('.')
-        if value:
-            result[target] = value
-
-    return result
-
-
-def _extract_company(parsed: dict[str, str]) -> str:
-    for key in ('resumo', 'acao'):
-        text = parsed.get(key, '')
-        match = re.search(r'empresa\s+(.+?)(?:\s+-|\.|$)', text, flags=re.IGNORECASE)
-        if match:
-            return match.group(1).strip()
-    return ''
-
-
-def _parse_alert_detail(url: str, session: requests.Session) -> dict[str, Any] | None:
-    response = session.get(url, timeout=REQUEST_TIMEOUT, verify=SSL_VERIFY)
-    response.raise_for_status()
-
-    soup = BeautifulSoup(response.text, 'html.parser')
-    container = soup.find('div', class_='bodyModel')
-    if not container:
-        return None
-
-    parsed: dict[str, str] = {}
-    current_key = ''
-
-    for element in container.find_all(['h4', 'p', 'a']):
-        if element.name == 'h4':
-            heading = _norm_heading(element.get_text(' ', strip=True))
-            current_key = FIELD_MAP.get(heading, heading.replace(' ', '_'))
-            continue
-
-        if not current_key:
-            continue
-
-        text = element.get_text(' ', strip=True)
-        anchors = element.find_all('a', href=True)
-
-        if anchors:
-            refs = []
-            for anchor in anchors:
-                href = urljoin(ALERTS_PAGE_URL, anchor['href'])
-                refs.append(f"{anchor.get_text(' ', strip=True)} => ({href})")
-            text = ' '.join(refs)
-
-        if not text:
-            continue
-
-        parsed[current_key] = f"{parsed[current_key]} {text}".strip() if parsed.get(current_key) else text
-
-    ident = parsed.get('identificacao_produto_ou_caso', '')
-    parsed.update(_parse_product_identification_block(ident))
-
-    company = _extract_company(parsed)
-    if company:
-        parsed['empresa'] = company
-
-    return parsed
 
 
 def _load_existing_alerts(path: Path) -> list[dict[str, Any]]:
@@ -202,6 +75,18 @@ def _is_fresh(path: Path, ttl_hours: int) -> bool:
     return datetime.now(tz=timezone.utc) - timestamp < timedelta(hours=ttl_hours)
 
 
+def _merge_alerts(existing: list[dict[str, Any]], discovered: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    merged_map = {str(item.get('numero_alerta') or ''): item for item in existing}
+    for item in discovered:
+        merged_map[str(item.get('numero_alerta') or '')] = item
+
+    def sort_key(record: tuple[str, dict[str, Any]]) -> int:
+        number = record[0]
+        return int(number) if number.isdigit() else -1
+
+    return [item for _, item in sorted(merged_map.items(), key=sort_key, reverse=True)]
+
+
 def collect_and_index_alerts(max_pages: int | None = None) -> dict[str, Any]:
     existing = _load_existing_alerts(ALERTS_DATA_FILE)
     existing_numbers = {str(item.get('numero_alerta') or '') for item in existing}
@@ -233,37 +118,35 @@ def collect_and_index_alerts(max_pages: int | None = None) -> dict[str, Any]:
                 break
 
             for card in cards:
-                title = _first_text(card, 'p.titulo')
-                number = _extract_alert_number(title)
-                if not number:
+                item = parse_alert_list_item(card)
+                if not item:
                     continue
 
+                number = item['numero_alerta']
                 if latest_known and number == latest_known:
                     stop_scan = True
                     break
-
                 if number in existing_numbers:
                     continue
 
-                date_text = _first_text(card, 'div.span3.data-hora')
-                link_node = card.find('a', href=True)
-                if not link_node:
-                    continue
-
-                detail_url = urljoin(ALERTS_PAGE_URL, link_node['href'])
-                detail = _parse_alert_detail(detail_url, session)
+                detail_response = session.get(item['url'], timeout=REQUEST_TIMEOUT, verify=SSL_VERIFY)
+                detail_response.raise_for_status()
+                detail = parse_alert_detail(detail_response.text, item['url'])
                 if not detail:
                     continue
 
                 alert = {
                     'numero_alerta': number,
-                    'data': _extract_date(date_text),
-                    'url': detail_url,
+                    'data': item['data'],
+                    'url': item['url'],
                     'resumo': detail.get('resumo', ''),
                     'identificacao_produto_ou_caso': detail.get('identificacao_produto_ou_caso', ''),
                     'problema': detail.get('problema', ''),
                     'acao': detail.get('acao', ''),
+                    'referencias': detail.get('referencias', ''),
+                    'historico': detail.get('historico', ''),
                     'recomendacoes': detail.get('recomendacoes', ''),
+                    'informacoes_complementares': detail.get('informacoes_complementares', ''),
                     'empresa': detail.get('empresa', ''),
                     'nome_comercial': detail.get('nome_comercial', ''),
                     'nome_tecnico': detail.get('nome_tecnico', ''),
@@ -275,12 +158,7 @@ def collect_and_index_alerts(max_pages: int | None = None) -> dict[str, Any]:
                 }
                 discovered.append(alert)
 
-    merged_map = {str(item.get('numero_alerta') or ''): item for item in existing}
-    for item in discovered:
-        merged_map[str(item.get('numero_alerta') or '')] = item
-
-    merged = [item for _, item in sorted(merged_map.items(), key=lambda x: x[0], reverse=True)]
-
+    merged = _merge_alerts(existing, discovered)
     _save_alerts(ALERTS_DATA_FILE, merged)
     save_index(ALERTS_INDEX_FILE, build_alerts_index(merged))
 
@@ -304,10 +182,15 @@ def ensure_alerts_dataset() -> dict[str, Any]:
     try:
         return collect_and_index_alerts()
     except requests.RequestException as exc:
+        total = len(_load_existing_alerts(ALERTS_DATA_FILE))
+        warning = (
+            'Não foi possível atualizar a coleta automática de alertas (possível bloqueio de origem da Anvisa). '
+            f'Base local existente foi mantida. Detalhe: {exc}'
+        )
         return {
             'status': 'collector_error',
-            'warning': f'Falha ao atualizar base local de alertas: {exc}',
+            'warning': warning,
             'new_alerts': 0,
-            'total_alerts': len(_load_existing_alerts(ALERTS_DATA_FILE)),
+            'total_alerts': total,
             'updated_at': _iso_now(),
         }

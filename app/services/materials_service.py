@@ -66,8 +66,8 @@ def _normalize_tokens(*values: str) -> list[str]:
 
 def _build_queries(registro: str, product: dict[str, Any]) -> list[str]:
     company = _clean((product.get('empresa') or {}).get('razaoSocial'))
-    nome_produto = _clean(product.get('nomeProduto'))
-    nome_tecnico = _clean(product.get('nomeTecnico'))
+    nome_produto = _clean(product.get('nomeProduto') or product.get('nome_produto') or product.get('nome_comercial'))
+    nome_tecnico = _clean(product.get('nomeTecnico') or product.get('nome_tecnico'))
     marca = _clean(product.get('marca'))
     modelo = _clean(product.get('modelo'))
     fabricante = _clean(product.get('fabricante')) or company
@@ -210,8 +210,8 @@ def find_related_materials(registro: str, product: dict[str, Any] | None = None)
         }
 
     product_tokens = _normalize_tokens(
-        product.get('nomeProduto'),
-        product.get('nomeTecnico'),
+        product.get('nomeProduto') or product.get('nome_produto') or product.get('nome_comercial'),
+        product.get('nomeTecnico') or product.get('nome_tecnico'),
         product.get('marca'),
         product.get('modelo'),
         product.get('fabricante'),
