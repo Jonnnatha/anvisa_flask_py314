@@ -43,6 +43,10 @@ ANVISA_API_BASE_URL = os.getenv('ANVISA_API_BASE_URL', 'https://api-gateway.prd.
 PRODUCTS_PAGE_URL = ANVISA_PRODUCT_API_URL
 ALERTS_PAGE_URL = 'https://antigo.anvisa.gov.br/alertas'
 
+ALERTS_DATA_FILE = DATA_DIR / 'anvisa_alertas.json'
+ALERTS_INDEX_FILE = DATA_DIR / 'anvisa_alertas_index.json'
+ALERTS_DATA_TTL_HOURS = int(os.getenv('ALERTS_DATA_TTL_HOURS', '24'))
+ALERTS_MAX_PAGES = int(os.getenv('ALERTS_MAX_PAGES', '12'))
 REQUEST_TIMEOUT = int(os.getenv('REQUEST_TIMEOUT', '30'))
 USER_AGENT = os.getenv(
     'ANVISA_USER_AGENT',
@@ -52,5 +56,3 @@ USER_AGENT = os.getenv(
 
 SSL_VERIFY = os.getenv('SSL_VERIFY', 'true').lower() in ('1', 'true', 'yes')
 
-ENABLE_EXTERNAL_ALERT_FALLBACK = os.getenv('ENABLE_EXTERNAL_ALERT_FALLBACK', 'true').lower() in ('1', 'true', 'yes')
-EXTERNAL_ALERT_LOOKUP_BASE_URL = os.getenv('EXTERNAL_ALERT_LOOKUP_BASE_URL', 'https://brunoroma.pythonanywhere.com')
