@@ -144,19 +144,33 @@ def normalize_product_response(response_data: dict[str, Any], registro: str) -> 
 
     item = selected or items[0]
     empresa = _get_nested(item, 'empresa')
-    nome_tecnico = item.get('nomeTecnico')
 
-    return {
+    normalized = {
         'numeroRegistro': str(item.get('numeroRegistro') or normalized_registro),
         'nomeProduto': str(item.get('nomeProduto') or '').strip(),
         'numeroProcesso': str(item.get('numeroProcesso') or '').strip(),
         'situacaoNotificacaoRegistro': str(item.get('situacaoNotificacaoRegistro') or '').strip(),
-        'nomeTecnico': str(nome_tecnico or '').strip(),
+        'nomeTecnico': str(item.get('nomeTecnico') or '').strip(),
+        'marca': str(item.get('marca') or item.get('nomeMarca') or '').strip(),
+        'modelo': str(item.get('modelo') or item.get('nomeModelo') or '').strip(),
+        'fabricante': str(item.get('fabricanteLegal') or item.get('fabricante') or '').strip(),
         'empresa': {
             'razaoSocial': str(empresa.get('razaoSocial') or '').strip(),
             'cnpj': str(empresa.get('cnpj') or '').strip(),
         },
     }
+
+    cleaned: dict[str, Any] = {}
+    for key, value in normalized.items():
+        if isinstance(value, dict):
+            nested = {nested_k: nested_v for nested_k, nested_v in value.items() if str(nested_v).strip()}
+            if nested:
+                cleaned[key] = nested
+            continue
+        if str(value).strip():
+            cleaned[key] = value
+
+    return cleaned
 
 
 def find_product_by_registration(registro: str) -> dict[str, Any] | None:

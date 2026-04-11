@@ -1,75 +1,51 @@
 from __future__ import annotations
 
+import json
 import re
 from typing import Any
 
-import requests
-
-from app.core.config import EXTERNAL_ALERT_LOOKUP_BASE_URL, REQUEST_TIMEOUT, SSL_VERIFY, USER_AGENT
-
-ALERT_NUMBER_RE = re.compile(r'\b\d{3,6}\b')
+from app.core.config import ALERTS_DATA_FILE, ALERTS_INDEX_FILE
+from app.services.alerts_collector import ensure_alerts_dataset
+from app.services.alerts_index import load_index
 
 
-def _parse_alert_numbers(text: str) -> list[str]:
-    if not text:
+def _normalize_registro(value: str) -> str:
+    return re.sub(r'\D', '', value or '')
+
+
+def _load_alerts() -> list[dict[str, Any]]:
+    if not ALERTS_DATA_FILE.exists():
+        return []
+    try:
+        payload = json.loads(ALERTS_DATA_FILE.read_text(encoding='utf-8'))
+    except (ValueError, OSError):
         return []
 
-    match = re.search(r'Alerta\(s\)\s*:\s*\[([^\]]*)\]', text, flags=re.IGNORECASE)
-    if match:
-        numbers = ALERT_NUMBER_RE.findall(match.group(1))
-    else:
-        numbers = ALERT_NUMBER_RE.findall(text)
-
-    unique: list[str] = []
-    for number in numbers:
-        if number not in unique:
-            unique.append(number)
-    return unique
-
-
-def _build_manual_link(numero_alerta: str) -> str:
-    return (
-        'https://www.gov.br/anvisa/pt-br/search'
-        f'?SearchableText=alerta%20{numero_alerta}%20anvisa'
-    )
+    if isinstance(payload, dict):
+        alerts = payload.get('alerts')
+        return alerts if isinstance(alerts, list) else []
+    return payload if isinstance(payload, list) else []
 
 
 def find_alerts_by_registration(registro: str) -> dict[str, Any]:
-    base_url = EXTERNAL_ALERT_LOOKUP_BASE_URL.rstrip('/')
-    lookup_url = f'{base_url}/registro/{registro}'
+    normalized_registro = _normalize_registro(registro)
+    sync_info = ensure_alerts_dataset()
 
-    headers = {
-        'User-Agent': USER_AGENT,
-        'Accept': 'text/plain,text/html,application/json;q=0.9,*/*;q=0.8',
-    }
+    alerts = _load_alerts()
+    index = load_index(ALERTS_INDEX_FILE)
 
-    try:
-        response = requests.get(lookup_url, timeout=REQUEST_TIMEOUT, verify=SSL_VERIFY, headers=headers)
-        response.raise_for_status()
-    except requests.RequestException as exc:
-        return {
-            'status': 'external_source_error',
-            'source': lookup_url,
-            'count': 0,
-            'alerts': [],
-            'warning': f'Falha ao consultar fonte externa de apoio para alertas: {exc}',
-        }
+    matched_numbers = (index.get('registro_anvisa') or {}).get(normalized_registro, [])
+    matched_set = {str(number).strip() for number in matched_numbers if str(number).strip()}
 
-    numbers = _parse_alert_numbers(response.text)
-    alerts = [
-        {
-            'numero_alerta': number,
-            'link_pesquisa_manual': _build_manual_link(number),
-            'origem_da_descoberta': 'Fonte externa de apoio: brunoroma.pythonanywhere.com',
-            'nivel_confianca': 'medio',
-        }
-        for number in numbers
+    matched_alerts = [
+        item for item in alerts if str(item.get('numero_alerta') or '').strip() in matched_set
     ]
 
     return {
-        'status': 'alerts_found' if alerts else 'no_alerts_found',
-        'source': lookup_url,
-        'count': len(alerts),
-        'alerts': alerts,
-        'warning': None,
+        'status': 'alerts_found' if matched_alerts else 'no_alerts_found',
+        'source': 'base local indexada de alertas Anvisa',
+        'count': len(matched_alerts),
+        'alerts': matched_alerts,
+        'warning': sync_info.get('warning'),
+        'sync': sync_info,
     }
