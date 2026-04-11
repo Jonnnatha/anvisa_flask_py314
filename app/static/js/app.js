@@ -34,23 +34,42 @@ function alertField(label, value) {
   return `<p><strong>${escapeHtml(label)}:</strong> ${escapeHtml(value)}</p>`;
 }
 
+function listField(label, values) {
+  if (!Array.isArray(values) || !values.length) return '';
+  const clean = values.filter(item => String(item || '').trim());
+  if (!clean.length) return '';
+  return `<div class="field"><span>${escapeHtml(label)}</span><strong>${escapeHtml(clean.join(' · '))}</strong></div>`;
+}
+
 function render(data) {
-  const product = data.product || {};
-  const company = product.empresa || {};
+  const official = data.official_data || data.product || {};
+  const company = official.empresa || {};
+  const enriched = data.enriched_data || {};
   const alerts = Array.isArray(data.alerts) ? data.alerts : [];
   const materials = Array.isArray(data.materials_or_signals) ? data.materials_or_signals : [];
 
-  const productFields = [
-    field('Número do registro', product.numeroRegistro || data.registro_anvisa),
-    field('Nome do produto', product.nomeProduto),
-    field('Número do processo', product.numeroProcesso),
-    field('Situação do registro/notificação', product.situacaoNotificacaoRegistro),
-    field('Nome técnico', product.nomeTecnico),
-    field('Marca', product.marca),
-    field('Modelo', product.modelo),
-    field('Fabricante', product.fabricante),
+  const officialFields = [
+    field('Número do registro', official.numeroRegistro || data.registro_anvisa),
+    field('Nome comercial', official.nomeProduto),
+    field('Nome técnico', official.nomeTecnico),
+    field('Número do processo', official.numeroProcesso),
+    field('Situação do registro/notificação', official.situacaoNotificacaoRegistro),
+    field('Marca', official.marca),
+    field('Modelo', official.modelo),
+    field('Fabricante', official.fabricante),
+    field('Tipo de produto', official.tipoProduto),
+    field('Classe de risco', official.classeRisco),
     field('Empresa (razão social)', company.razaoSocial),
     field('Empresa (CNPJ)', company.cnpj)
+  ].filter(Boolean).join('');
+
+  const enrichedFields = [
+    field('Nome comercial (sugerido)', enriched.nome_comercial_sugerido),
+    field('Nome técnico (sugerido)', enriched.nome_tecnico_sugerido),
+    field('Fabricante (sugerido)', enriched.fabricante_sugerido),
+    field('Tipo de produto (sugerido)', enriched.tipo_produto_sugerido),
+    field('Classe de risco (sugerida)', enriched.classe_risco_sugerida),
+    listField('Modelos relacionados (evidência em alertas/documentos)', enriched.modelos_relacionados)
   ].filter(Boolean).join('');
 
   const alertsHtml = alerts.length
@@ -84,14 +103,30 @@ function render(data) {
         <a href="${escapeHtml(item.link)}" target="_blank" rel="noopener noreferrer">Abrir material</a>
       </article>
     `).join('')
-    : '<p>Nenhuma evidência pública forte foi encontrada para materiais técnicos deste produto.</p>';
+    : '<p>Nenhum material técnico público relevante foi encontrado para este produto.</p>';
+
+  const materialsSource = Array.isArray(data.materials_source)
+    ? data.materials_source.map(item => `<li><a href="${escapeHtml(item)}" target="_blank" rel="noopener noreferrer">${escapeHtml(item)}</a></li>`).join('')
+    : '';
+
+  const enrichedBlock = enrichedFields
+    ? `
+      <div class="box">
+        <h2>Dados enriquecidos do produto</h2>
+        <p class="meta">Origem: ${escapeHtml(data.origens?.enriquecimento || '')}.</p>
+        <div class="grid">${enrichedFields}</div>
+      </div>
+    `
+    : '';
 
   resultado.innerHTML = `
     <div class="box">
-      <h2>Dados do produto</h2>
+      <h2>Dados oficiais do produto</h2>
       <p class="meta">Origem: ${escapeHtml(data.origens?.produto || 'API oficial ANVISA')}</p>
-      <div class="grid">${productFields || '<p>Sem campos confiáveis para exibir.</p>'}</div>
+      <div class="grid">${officialFields || '<p>Sem campos oficiais confiáveis para exibir.</p>'}</div>
     </div>
+
+    ${enrichedBlock}
 
     <div class="box">
       <h2>Alertas (${alerts.length})</h2>
@@ -105,6 +140,7 @@ function render(data) {
       <p class="meta">Origem: ${escapeHtml(data.origens?.materiais || '')}.</p>
       ${data.materials_warning ? `<div class="feedback warning">${escapeHtml(data.materials_warning)}</div>` : ''}
       ${materialsHtml}
+      ${materialsSource ? `<details class="manual-links"><summary>Consultas realizadas</summary><ul>${materialsSource}</ul></details>` : ''}
     </div>
   `;
 
