@@ -26,10 +26,13 @@ GOVBR_SEARCH_URL = 'https://www.gov.br/anvisa/pt-br/search'
 DUCKDUCKGO_HTML_URL = 'https://duckduckgo.com/html/'
 
 MATERIAL_TYPES: dict[str, tuple[str, ...]] = {
+    'pdf': ('.pdf', ' pdf ', ' filetype:pdf'),
     'manual': (' manual ', ' user manual ', 'operators manual', 'manual do equipamento', 'operation manual'),
     'ifu': ('ifu', 'instructions for use', 'instruções de uso', 'instrucoes de uso'),
     'service_manual': ('service manual', 'manual de serviço', 'manual de servico', 'maintenance manual'),
     'training': ('training', 'treinamento', 'capacitação', 'capacitacao', 'curso técnico'),
+    'complaint': ('reclamação', 'reclamacao', 'complaint', 'consumer complaint', 'queixa técnica', 'queixa tecnica'),
+    'forum': ('forum', 'fórum', 'community discussion', 'discussion thread', 'discussão'),
     'catalog': ('catalog', 'catálogo técnico', 'catalogo tecnico', 'brochure', 'folheto técnico'),
     'technical_bulletin': ('technical bulletin', 'boletim técnico', 'boletim tecnico', 'service bulletin'),
     'recall': ('recall', 'recolhimento', 'aviso de recolhimento'),
@@ -41,10 +44,13 @@ MATERIAL_TYPES: dict[str, tuple[str, ...]] = {
 
 # Ordem de prioridade solicitada: manual > ifu > service_manual > training > catalog > recall ...
 TYPE_PRIORITY = {
+    'pdf': 166,
     'manual': 160,
     'ifu': 152,
     'service_manual': 144,
     'training': 136,
+    'complaint': 132,
+    'forum': 124,
     'catalog': 128,
     'recall': 120,
     'safety_notice': 116,
@@ -89,6 +95,7 @@ BLOCKED_URL_PATTERNS = (
 )
 
 USEFUL_TERMS = (
+    'pdf',
     'manual',
     'instruções de uso',
     'instrucoes de uso',
@@ -96,6 +103,11 @@ USEFUL_TERMS = (
     'ifu',
     'service manual',
     'training',
+    'forum',
+    'fórum',
+    'reclamação',
+    'reclamacao',
+    'complaint',
     'recall',
     'safety notice',
     'field corrective action',
@@ -419,16 +431,16 @@ def _score_relevance(
     title = _normalize(row.get('titulo', ''))
     snippet = _normalize(row.get('resumo', ''))
     link = row['link'].casefold()
-
-    if any(noise in context for noise in GENERIC_NOISE):
-        row['discard_reason'] = 'generic_noise'
-        return None
-    if any(pattern in link for pattern in BLOCKED_URL_PATTERNS):
-        row['discard_reason'] = 'blocked_url_pattern'
-        return None
+    is_pdf = link.endswith('.pdf') or '.pdf?' in link or '/pdf/' in link
 
     material_type = _classify_type(context)
+    if is_pdf and material_type == 'possible_material':
+        material_type = 'pdf'
     score = TYPE_PRIORITY.get(material_type, 82)
+    if any(noise in context for noise in GENERIC_NOISE):
+        score -= 16
+    if any(pattern in link for pattern in BLOCKED_URL_PATTERNS):
+        score -= 18
 
     digits_context = re.sub(r'\D', '', context)
     registro_digits = re.sub(r'\D', '', registro)
@@ -472,7 +484,7 @@ def _score_relevance(
     domain = row.get('fonte', '')
     domain_score = _domain_relevance_score(domain, manufacturer_domains)
     score += domain_score
-    if link.endswith('.pdf'):
+    if is_pdf:
         score += 18
     if product_in_title:
         score += 42
@@ -535,7 +547,7 @@ def _score_relevance(
     elif score >= 118:
         confidence = 'medio'
 
-    if score < 78 and not plausible_candidate:
+    if score < 62 and not plausible_candidate:
         row['discard_reason'] = 'low_confidence'
         return None
 
@@ -548,6 +560,7 @@ def _score_relevance(
     return {
         'titulo': row['titulo'],
         'tipo': item_type,
+        'is_pdf': is_pdf,
         'fonte': row['fonte'],
         'link': row['link'],
         'resumo': row['resumo'],
