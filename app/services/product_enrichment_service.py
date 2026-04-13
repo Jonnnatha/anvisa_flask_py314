@@ -76,6 +76,20 @@ def _extract_brands_from_documents(indexed_documents: list[dict[str, Any]]) -> l
     return _unique(chunks)[:6]
 
 
+def _extract_first_by_label(indexed_documents: list[dict[str, Any]], labels: tuple[str, ...]) -> str:
+    for item in indexed_documents:
+        if not isinstance(item, dict):
+            continue
+        text = ' '.join(str(item.get(key) or '') for key in ('titulo', 'resumo', 'tipo'))
+        for label in labels:
+            match = re.search(rf'{label}\s*[:\-]?\s*([A-Za-z0-9][A-Za-z0-9 .,&/\-]{{2,80}})', text, flags=re.I)
+            if match:
+                candidate = _clean_text(match.group(1))
+                if candidate:
+                    return candidate
+    return ''
+
+
 def build_consolidated_product_data(official_data: dict[str, Any], enriched_data: dict[str, Any]) -> dict[str, Any]:
     ordered_fields = [
         ('numero_registro', 'Número do registro'),
@@ -144,21 +158,25 @@ def enrich_product_data(
     doc_manufacturers = _unique([
         doc.get('fabricante') or doc.get('manufacturer') for doc in indexed_documents if isinstance(doc, dict)
     ])
+    doc_nome_tecnico = _extract_first_by_label(indexed_documents, ('nome técnico', 'nome tecnico', 'technical name'))
+    doc_nome_comercial = _extract_first_by_label(indexed_documents, ('nome comercial', 'commercial name'))
+    doc_tipo_produto = _extract_first_by_label(indexed_documents, ('tipo de produto', 'product type'))
+    doc_classe_risco = _extract_first_by_label(indexed_documents, ('classe de risco', 'risk class'))
 
-    brand = official_brand or (alert_brands[0] if alert_brands else '') or (doc_brands[0] if doc_brands else '')
-    model = official_model or (alert_models[0] if alert_models else '') or (doc_models[0] if doc_models else '')
+    brand = official_brand or (doc_brands[0] if doc_brands else '') or (alert_brands[0] if alert_brands else '')
+    model = official_model or (doc_models[0] if doc_models else '') or (alert_models[0] if alert_models else '')
 
     manufacturer = official_manufacturer
     if not manufacturer:
         manufacturer_candidates = _unique([official_company, *alert_companies, *doc_manufacturers])
         manufacturer = manufacturer_candidates[0] if manufacturer_candidates else ''
 
-    nome_comercial = official_nome_comercial or (alert_nome_comercial[0] if alert_nome_comercial else '')
+    nome_comercial = official_nome_comercial or doc_nome_comercial or (alert_nome_comercial[0] if alert_nome_comercial else '')
     if _normalize_key(nome_comercial) == _normalize_key(_pick_from_dict(official_data, 'nomeProduto')):
         nome_comercial = ''
-    nome_tecnico = official_nome_tecnico or (alert_nome_tecnico[0] if alert_nome_tecnico else '')
-    tipo_produto = official_tipo_produto or (alert_tipo[0] if alert_tipo else '')
-    classe_risco = official_classe_risco or (alert_risco[0] if alert_risco else '')
+    nome_tecnico = official_nome_tecnico or doc_nome_tecnico or (alert_nome_tecnico[0] if alert_nome_tecnico else '')
+    tipo_produto = official_tipo_produto or doc_tipo_produto or (alert_tipo[0] if alert_tipo else '')
+    classe_risco = official_classe_risco or doc_classe_risco or (alert_risco[0] if alert_risco else '')
 
     base = {
         'numero_registro': _pick_from_dict(official_data, 'numeroRegistro'),

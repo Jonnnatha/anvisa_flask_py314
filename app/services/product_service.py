@@ -129,6 +129,16 @@ def _get_nested(item: dict[str, Any], key: str) -> Any:
     return {}
 
 
+def _pick_first(item: dict[str, Any], *keys: str) -> str:
+    for key in keys:
+        value = item.get(key)
+        if isinstance(value, (str, int, float)):
+            text = str(value).strip()
+            if text and text not in {'-', '--'}:
+                return text
+    return ''
+
+
 def normalize_product_response(response_data: dict[str, Any], registro: str) -> dict[str, Any] | None:
     items = _extract_items(response_data)
     if not items:
@@ -144,19 +154,31 @@ def normalize_product_response(response_data: dict[str, Any], registro: str) -> 
 
     item = selected or items[0]
     empresa = _get_nested(item, 'empresa')
+    classe_risco = _get_nested(item, 'classeRisco')
+    tipo_produto = _get_nested(item, 'tipoProduto')
 
     normalized = {
-        'numeroRegistro': str(item.get('numeroRegistro') or normalized_registro),
-        'nomeProduto': str(item.get('nomeProduto') or '').strip(),
-        'numeroProcesso': str(item.get('numeroProcesso') or '').strip(),
-        'situacaoNotificacaoRegistro': str(item.get('situacaoNotificacaoRegistro') or '').strip(),
-        'nomeTecnico': str(item.get('nomeTecnico') or '').strip(),
-        'marca': str(item.get('marca') or item.get('nomeMarca') or '').strip(),
-        'modelo': str(item.get('modelo') or item.get('nomeModelo') or '').strip(),
-        'fabricante': str(item.get('fabricanteLegal') or item.get('fabricante') or '').strip(),
+        'numeroRegistro': _pick_first(item, 'numeroRegistro') or normalized_registro,
+        'nomeProduto': _pick_first(item, 'nomeProduto', 'nomeComercial', 'produto'),
+        'nomeComercial': _pick_first(item, 'nomeComercial', 'nomeProduto'),
+        'numeroProcesso': _pick_first(item, 'numeroProcesso', 'processo'),
+        'situacaoNotificacaoRegistro': _pick_first(
+            item,
+            'situacaoNotificacaoRegistro',
+            'situacaoRegistro',
+            'situacao',
+        ),
+        'nomeTecnico': _pick_first(item, 'nomeTecnico', 'descricaoNomeTecnico', 'nomeTecnicoProduto'),
+        'marca': _pick_first(item, 'marca', 'nomeMarca'),
+        'modelo': _pick_first(item, 'modelo', 'nomeModelo'),
+        'fabricante': _pick_first(item, 'fabricanteLegal', 'fabricante', 'nomeFabricante'),
+        'classeRisco': _pick_first(item, 'classeRisco', 'descricaoClasseRisco')
+        or _pick_first(classe_risco, 'descricao', 'nome'),
+        'tipoProduto': _pick_first(item, 'tipoProduto', 'descricaoTipoProduto')
+        or _pick_first(tipo_produto, 'descricao', 'nome'),
         'empresa': {
-            'razaoSocial': str(empresa.get('razaoSocial') or '').strip(),
-            'cnpj': str(empresa.get('cnpj') or '').strip(),
+            'razaoSocial': _pick_first(empresa, 'razaoSocial', 'nomeEmpresa'),
+            'cnpj': _pick_first(empresa, 'cnpj'),
         },
     }
 
