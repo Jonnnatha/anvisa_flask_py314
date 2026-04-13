@@ -5,7 +5,7 @@ import time
 import logging
 from dataclasses import dataclass
 from typing import Any
-from urllib.parse import quote_plus, urlparse
+from urllib.parse import parse_qs, quote_plus, urlparse
 
 import requests
 from bs4 import BeautifulSoup
@@ -24,6 +24,7 @@ from app.core.config import (
 
 GOVBR_SEARCH_URL = 'https://www.gov.br/anvisa/pt-br/search'
 DUCKDUCKGO_HTML_URL = 'https://duckduckgo.com/html/'
+GOOGLE_SEARCH_URL = 'https://www.google.com/search'
 
 MATERIAL_TYPES: dict[str, tuple[str, ...]] = {
     'pdf': ('.pdf', ' pdf ', ' filetype:pdf'),
@@ -112,6 +113,18 @@ USEFUL_TERMS = (
     'safety notice',
     'field corrective action',
     'fsca',
+)
+
+MANDATORY_QUERY_SUFFIXES: tuple[tuple[str, str], ...] = (
+    ('manual', 'product_manual'),
+    ('IFU', 'product_ifu'),
+    ('instruções de uso', 'product_ifu_pt'),
+    ('service manual', 'product_service_manual'),
+    ('training', 'product_training'),
+    ('recall', 'product_recall'),
+    ('forum', 'product_forum'),
+    ('reclamação', 'product_complaint'),
+    ('pdf', 'product_pdf'),
 )
 
 LOGGER = logging.getLogger(__name__)
@@ -220,13 +233,9 @@ def _build_queries(registro: str, product: dict[str, Any]) -> list[SearchStrateg
 
     # Camada 1: ancoragem forte no nome do produto.
     if produto:
+        for suffix, name in MANDATORY_QUERY_SUFFIXES:
+            _add_query(strategies, seen, name, f'{produto} {suffix}', layer=1)
         for suffix, name in (
-            ('manual', 'product_manual'),
-            ('IFU', 'product_ifu'),
-            ('instruções de uso', 'product_ifu_pt'),
-            ('service manual', 'product_service_manual'),
-            ('training', 'product_training'),
-            ('recall', 'product_recall'),
             ('safety notice', 'product_safety_notice'),
             ('field corrective action', 'product_fca'),
             ('catálogo técnico', 'product_catalog'),
@@ -237,6 +246,7 @@ def _build_queries(registro: str, product: dict[str, Any]) -> list[SearchStrateg
     # Camada 2: combinações com fabricante/modelo/marca.
     if fabricante and produto:
         _add_query(strategies, seen, 'manufacturer_product_manual', f'{fabricante} {produto} manual', layer=2)
+        _add_query(strategies, seen, 'manufacturer_product_ifu', f'{fabricante} {produto} IFU', layer=2)
 
     if fabricante and modelo:
         for suffix, name in (
@@ -287,10 +297,16 @@ def _build_recommended_queries(identity: dict[str, str]) -> list[str]:
                 f'{produto} manual',
                 f'{produto} IFU',
                 f'{produto} instruções de uso',
+                f'{produto} service manual',
                 f'{produto} training',
                 f'{produto} recall',
+                f'{produto} forum',
+                f'{produto} reclamação',
+                f'{produto} pdf',
             ]
         )
+    if fabricante and produto:
+        suggestions.append(f'{fabricante} {produto} IFU')
     if fabricante and produto:
         suggestions.append(f'{fabricante} {produto} manual')
     if fabricante and modelo:
@@ -382,6 +398,57 @@ def _parse_duckduckgo_page(query: str) -> dict[str, Any]:
                 'fonte': urlparse(href).netloc.lower(),
             }
         )
+    return {'rows': rows, 'blocks_found': blocks_found}
+
+
+def _parse_google_page(query: str) -> dict[str, Any]:
+    headers = {'User-Agent': USER_AGENT, 'Accept': 'text/html,*/*', 'Accept-Language': 'pt-BR,pt;q=0.9,en;q=0.8'}
+    response = requests.get(
+        GOOGLE_SEARCH_URL,
+        params={'q': query, 'num': 10, 'hl': 'pt-BR'},
+        timeout=MATERIALS_REQUEST_TIMEOUT,
+        verify=SSL_VERIFY,
+        headers=headers,
+    )
+    response.raise_for_status()
+
+    soup = BeautifulSoup(response.text, 'html.parser')
+    rows: list[dict[str, str]] = []
+    blocks_found = 0
+
+    for block in soup.select('div.g'):
+        blocks_found += 1
+        anchor = block.select_one('a[href]')
+        title_node = block.select_one('h3')
+        snippet_node = block.select_one('div.VwiC3b, span.aCOpRe, div[data-sncf]')
+        if not anchor or not title_node:
+            continue
+        href = _clean(anchor.get('href'))
+        title = _clean(title_node.get_text(' ', strip=True))
+        snippet = _clean(snippet_node.get_text(' ', strip=True)) if snippet_node else ''
+        if not href or not title:
+            continue
+        if href.startswith('/url?'):
+            parsed_google = urlparse(href)
+            extracted = parse_qs(parsed_google.query).get('q', [''])[0]
+            href = _clean(extracted)
+        if href.startswith('/search'):
+            continue
+        if href.startswith('/'):
+            href = f'https://www.google.com{href}'
+        if _is_blocked_domain(href):
+            continue
+
+        rows.append(
+            {
+                'titulo': title,
+                'link': href,
+                'resumo': snippet[:400],
+                'contexto': _normalize(f'{title} {snippet} {href}'),
+                'fonte': urlparse(href).netloc.lower(),
+            }
+        )
+
     return {'rows': rows, 'blocks_found': blocks_found}
 
 
@@ -522,6 +589,9 @@ def _score_relevance(
             or technical_name_hit
             or token_hits >= 2
             or (manufacturer_hit and _has_useful_term(title, snippet))
+            or (product_in_title and _has_useful_term(title, snippet))
+            or (manufacturer_in_title_or_snippet and product_in_snippet)
+            or (_has_useful_term(title, snippet) and (manufacturer_hit or model_hit))
         )
         if not minimal_relation:
             row['discard_reason'] = 'weak_relation'
@@ -600,6 +670,49 @@ def _dedupe_items(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return deduped
 
 
+def _fallback_from_rows(rows: list[dict[str, str]], identity: dict[str, str]) -> list[dict[str, Any]]:
+    fallback_items: list[dict[str, Any]] = []
+    seen_links: set[str] = set()
+    product_name = _normalize(identity.get('nome_produto', ''))
+    manufacturer = _normalize(identity.get('fabricante', ''))
+    for row in rows:
+        title = row.get('titulo', '')
+        snippet = row.get('resumo', '')
+        link = row.get('link', '')
+        if not link:
+            continue
+        if link in seen_links:
+            continue
+        normalized_text = _normalize(f'{title} {snippet}')
+        plausible = bool(
+            _contains_haystack(normalized_text, product_name)
+            or (
+                _contains_haystack(normalized_text, manufacturer)
+                and _contains_haystack(normalized_text, product_name)
+            )
+            or _has_useful_term(title, snippet, link)
+        )
+        if not plausible:
+            continue
+        seen_links.add(link)
+        material_type = _classify_type(_normalize(f'{title} {snippet} {link}'))
+        is_pdf = link.lower().endswith('.pdf') or '.pdf?' in link.lower() or '/pdf/' in link.lower()
+        if is_pdf and material_type == 'possible_material':
+            material_type = 'pdf'
+        fallback_items.append(
+            {
+                'titulo': title or 'Resultado público',
+                'tipo': material_type,
+                'is_pdf': is_pdf,
+                'fonte': row.get('fonte') or urlparse(link).netloc.lower(),
+                'link': link,
+                'resumo': snippet,
+                'nivel_confianca': 'baixo',
+            }
+        )
+    return fallback_items
+
+
 def find_related_materials(registro: str, product: dict[str, Any] | None = None) -> dict[str, Any]:
     product = product or {}
     identity = _product_identity(product)
@@ -644,6 +757,7 @@ def find_related_materials(registro: str, product: dict[str, Any] | None = None)
     parse_failures = 0
     strategy_logs: list[dict[str, Any]] = []
     discard_reasons: dict[str, int] = {}
+    fallback_rows: list[dict[str, str]] = []
 
     for strategy in queries:
         strategy_log: dict[str, Any] = {
@@ -694,6 +808,27 @@ def find_related_materials(registro: str, product: dict[str, Any] | None = None)
             LOGGER.warning('materials.error registro=%s fonte=govbr strategy=%s erro=%s', registro, strategy.name, exc)
 
         try:
+            google_result = _parse_google_page(strategy.query)
+            google_rows = google_result['rows']
+            rows.extend(google_rows)
+            strategy_log['sources'].append({'source': 'google', 'status': 'ok', 'rows': len(google_rows), 'blocks': google_result.get('blocks_found', 0)})
+            if google_result.get('blocks_found', 0) > 0 and not google_rows:
+                parse_failures += 1
+                strategy_log['sources'][-1]['status'] = 'parse_failure'
+                strategy_log['sources'][-1]['detail'] = 'blocks_without_valid_rows'
+            LOGGER.info('materials.source.done registro=%s strategy=%s fonte=google rows=%s', registro, strategy.name, len(google_rows))
+        except requests.Timeout:
+            had_errors = True
+            blocked_sources += 1
+            strategy_log['sources'].append({'source': 'google', 'status': 'timeout', 'rows': 0})
+            LOGGER.warning('materials.timeout registro=%s fonte=google strategy=%s', registro, strategy.name)
+        except requests.RequestException as exc:
+            had_errors = True
+            blocked_sources += 1
+            strategy_log['sources'].append({'source': 'google', 'status': 'blocked_source', 'rows': 0, 'error': str(exc)})
+            LOGGER.warning('materials.error registro=%s fonte=google strategy=%s erro=%s', registro, strategy.name, exc)
+
+        try:
             duck_result = _parse_duckduckgo_page(strategy.query)
             duck_rows = duck_result['rows']
             rows.extend(duck_rows)
@@ -716,6 +851,7 @@ def find_related_materials(registro: str, product: dict[str, Any] | None = None)
 
         strategy_log['raw_rows'] = len(rows)
         total_rows_collected += len(rows)
+        fallback_rows.extend(rows)
         LOGGER.info('materials.strategy.collected registro=%s strategy=%s rows=%s', registro, strategy.name, len(rows))
 
         for row in rows[:MATERIALS_MAX_ROWS_PER_STRATEGY]:
@@ -779,6 +915,8 @@ def find_related_materials(registro: str, product: dict[str, Any] | None = None)
             break
 
     deduped = _dedupe_items(ranked)
+    if not deduped and fallback_rows:
+        deduped = _dedupe_items(_fallback_from_rows(fallback_rows, identity))
     duration_ms = int((time.perf_counter() - started_at) * 1000)
     LOGGER.info(
         'materials.done registro=%s resultados=%s rows_processed=%s rows_collected=%s filtered=%s sources=%s timeout=%s errors=%s parse_failures=%s blocked_sources=%s duracao_ms=%s discard_reasons=%s',
@@ -811,6 +949,9 @@ def find_related_materials(registro: str, product: dict[str, Any] | None = None)
     elif not deduped:
         status = 'no_results'
         warning = 'Nenhum material técnico público relevante foi encontrado para este produto.'
+    elif all(item.get('nivel_confianca') == 'baixo' for item in deduped):
+        status = 'possible_materials_found'
+        warning = 'A busca retornou links plausíveis; valide o conteúdo antes de uso.'
     elif status == 'possible_materials_found':
         warning = 'A busca encontrou materiais plausíveis com menor confiança; valide os documentos antes do uso.'
 

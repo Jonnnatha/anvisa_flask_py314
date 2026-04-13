@@ -9,8 +9,8 @@ const materialTypeLabels = {
   ifu: 'IFU / Instruções de uso',
   service_manual: 'Manual de serviço',
   training: 'Treinamento',
-  complaint: 'Reclamação pública',
-  forum: 'Discussão em fórum',
+  complaint: 'Reclamação',
+  forum: 'Fórum',
   catalog: 'Catálogo técnico',
   recall: 'Recall',
   safety_notice: 'Safety notice',
@@ -163,7 +163,7 @@ function render(data) {
 
   const statusMessage = fallbackByStatus[materialsStatus] || '';
   const primaryMessage = materialsWarning || statusMessage;
-  const showRecommended = !materials.length || materialsStatus === 'possible_materials_found';
+  const showRecommended = !materials.length;
   const recommendedHtml = showRecommended ? renderRecommendedSearches(recommendedSearches) : '';
   const materialsHtml = materials.length
     ? `${primaryMessage ? `<p>${escapeHtml(primaryMessage)}</p>` : ''}${materials.map(renderMaterial).join('')}${recommendedHtml}`
