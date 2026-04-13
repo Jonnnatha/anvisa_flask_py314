@@ -96,7 +96,7 @@ def search_by_registration(value: str) -> dict[str, Any]:
     materials_product_context.update(enrichment_result.get('enriched_data', {}))
     materials_result: dict[str, Any] = {
         'items': [],
-        'status': 'timeout',
+        'status': 'search_timeout',
         'warning': MATERIALS_TIMEOUT_WARNING,
         'source': [],
         'recommended_searches': [],
@@ -112,21 +112,21 @@ def search_by_registration(value: str) -> dict[str, Any]:
         LOGGER.warning('search.materials.timeout registro=%s timeout_s=%s', registro, MATERIALS_TOTAL_TIMEOUT + 1)
         materials_result = {
             'items': [],
-            'status': 'timeout',
+            'status': 'search_timeout',
             'warning': MATERIALS_TIMEOUT_WARNING,
             'source': [],
             'recommended_searches': [],
-            'diagnostics': {'status': 'timeout', 'reason': 'future_timeout'},
+            'diagnostics': {'status': 'search_timeout', 'reason': 'future_timeout'},
         }
     except Exception as exc:
         LOGGER.exception('search.materials.error registro=%s erro=%s', registro, exc)
         materials_result = {
             'items': [],
-            'status': 'blocked_source',
+            'status': 'search_blocked',
             'warning': MATERIALS_TIMEOUT_WARNING,
             'source': [],
             'recommended_searches': [],
-            'diagnostics': {'status': 'blocked_source', 'reason': str(exc)},
+            'diagnostics': {'status': 'search_blocked', 'reason': str(exc)},
         }
 
     enrichment_result = enrich_product_data(
