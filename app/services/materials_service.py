@@ -87,7 +87,7 @@ BLOCKED_URL_PATTERNS = (
 )
 
 LOGGER = logging.getLogger(__name__)
-MATERIALS_TIMEOUT_WARNING = 'Não foi possível concluir a busca aprofundada de materiais técnicos nesta consulta.'
+MATERIALS_AUTOSEARCH_WARNING = 'Não foi possível concluir a busca automática de materiais nesta consulta.'
 
 
 @dataclass(frozen=True)
@@ -247,15 +247,52 @@ def _build_queries(registro: str, product: dict[str, Any]) -> list[SearchStrateg
     return strategies[:30]
 
 
-def _parse_search_page(search_url: str) -> list[dict[str, str]]:
+def _build_recommended_queries(identity: dict[str, str]) -> list[str]:
+    produto = identity.get('nome_produto', '')
+    fabricante = identity.get('fabricante', '')
+    modelo = identity.get('modelo', '')
+    suggestions: list[str] = []
+
+    if produto:
+        suggestions.extend(
+            [
+                f'{produto} manual',
+                f'{produto} IFU',
+                f'{produto} instruções de uso',
+                f'{produto} training',
+                f'{produto} recall',
+            ]
+        )
+    if fabricante and produto:
+        suggestions.append(f'{fabricante} {produto} manual')
+    if fabricante and modelo:
+        suggestions.append(f'{fabricante} {modelo} manual')
+
+    seen: set[str] = set()
+    deduped: list[str] = []
+    for suggestion in suggestions:
+        query = ' '.join(suggestion.split()).strip()
+        if not query:
+            continue
+        key = query.casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(query)
+    return deduped[:8]
+
+
+def _parse_search_page(search_url: str) -> dict[str, Any]:
     headers = {'User-Agent': USER_AGENT, 'Accept': 'text/html,*/*'}
     response = requests.get(search_url, timeout=MATERIALS_REQUEST_TIMEOUT, verify=SSL_VERIFY, headers=headers)
     response.raise_for_status()
 
     soup = BeautifulSoup(response.text, 'html.parser')
     rows: list[dict[str, str]] = []
+    anchors_found = 0
 
     for anchor in soup.select('a'):
+        anchors_found += 1
         href = _clean(anchor.get('href'))
         title = anchor.get_text(' ', strip=True)
         if not href or not title:
@@ -280,10 +317,10 @@ def _parse_search_page(search_url: str) -> list[dict[str, str]]:
             }
         )
 
-    return rows
+    return {'rows': rows, 'anchors_found': anchors_found}
 
 
-def _parse_duckduckgo_page(query: str) -> list[dict[str, str]]:
+def _parse_duckduckgo_page(query: str) -> dict[str, Any]:
     headers = {'User-Agent': USER_AGENT, 'Accept': 'text/html,*/*'}
     response = requests.get(
         DUCKDUCKGO_HTML_URL,
@@ -296,8 +333,10 @@ def _parse_duckduckgo_page(query: str) -> list[dict[str, str]]:
 
     soup = BeautifulSoup(response.text, 'html.parser')
     rows: list[dict[str, str]] = []
+    blocks_found = 0
 
     for block in soup.select('.result'):
+        blocks_found += 1
         anchor = block.select_one('.result__a')
         if not anchor:
             continue
@@ -315,7 +354,7 @@ def _parse_duckduckgo_page(query: str) -> list[dict[str, str]]:
                 'fonte': urlparse(href).netloc.lower(),
             }
         )
-    return rows
+    return {'rows': rows, 'blocks_found': blocks_found}
 
 
 def _classify_type(context: str) -> str:
@@ -344,8 +383,10 @@ def _score_relevance(
     link = row['link'].casefold()
 
     if any(noise in context for noise in GENERIC_NOISE):
+        row['discard_reason'] = 'generic_noise'
         return None
     if any(pattern in link for pattern in BLOCKED_URL_PATTERNS):
+        row['discard_reason'] = 'blocked_url_pattern'
         return None
 
     material_type = _classify_type(context)
@@ -403,6 +444,7 @@ def _score_relevance(
     )
 
     if not strong_relation:
+        row['discard_reason'] = 'weak_relation'
         return None
 
     confidence = 'baixo'
@@ -412,6 +454,7 @@ def _score_relevance(
         confidence = 'medio'
 
     if confidence == 'baixo':
+        row['discard_reason'] = 'low_confidence'
         return None
 
     return {
@@ -456,11 +499,20 @@ def find_related_materials(registro: str, product: dict[str, Any] | None = None)
     identity = _product_identity(product)
     queries = _build_queries(registro, product)[:MATERIALS_MAX_STRATEGIES]
 
+    recommended_queries = _build_recommended_queries(identity)
+    recommended_searches = [
+        {'query': query, 'url': f'https://www.google.com/search?q={quote_plus(query)}'}
+        for query in recommended_queries
+    ]
+
     if not queries:
         return {
             'items': [],
+            'status': 'parse_failure',
             'warning': 'Nenhum termo suficiente foi encontrado para busca de materiais técnicos.',
             'source': [GOVBR_SEARCH_URL],
+            'recommended_searches': recommended_searches,
+            'diagnostics': {'reason': 'missing_query_terms'},
         }
 
     product_tokens = _normalize_tokens(
@@ -478,16 +530,36 @@ def find_related_materials(registro: str, product: dict[str, Any] | None = None)
     started_at = time.perf_counter()
     deadline = started_at + MATERIALS_TOTAL_TIMEOUT
     total_rows_processed = 0
+    total_rows_collected = 0
+    total_filtered_out = 0
     timeout_reached = False
     had_errors = False
+    blocked_sources = 0
+    parse_failures = 0
+    strategy_logs: list[dict[str, Any]] = []
+    discard_reasons: dict[str, int] = {}
 
     for strategy in queries:
+        strategy_log: dict[str, Any] = {
+            'strategy': strategy.name,
+            'query': strategy.query,
+            'layer': strategy.layer,
+            'sources': [],
+            'raw_rows': 0,
+            'filtered_out': 0,
+            'accepted': 0,
+        }
+        LOGGER.info('materials.strategy.start registro=%s strategy=%s query="%s"', registro, strategy.name, strategy.query)
         if time.perf_counter() >= deadline:
             timeout_reached = True
             LOGGER.warning('materials.timeout registro=%s etapa=strategy_loop', registro)
+            strategy_log['aborted'] = 'deadline_reached'
+            strategy_logs.append(strategy_log)
             break
         if len(visited_urls) >= MATERIALS_MAX_SOURCES:
             LOGGER.info('materials.limit_sources registro=%s limite=%s', registro, MATERIALS_MAX_SOURCES)
+            strategy_log['aborted'] = 'source_limit_reached'
+            strategy_logs.append(strategy_log)
             break
 
         search_url = f"{GOVBR_SEARCH_URL}?SearchableText={quote_plus(strategy.query)}"
@@ -495,22 +567,50 @@ def find_related_materials(registro: str, product: dict[str, Any] | None = None)
 
         rows: list[dict[str, str]] = []
         try:
-            rows.extend(_parse_search_page(search_url))
+            gov_result = _parse_search_page(search_url)
+            gov_rows = gov_result['rows']
+            rows.extend(gov_rows)
+            strategy_log['sources'].append({'source': 'govbr', 'status': 'ok', 'rows': len(gov_rows), 'anchors': gov_result.get('anchors_found', 0)})
+            if gov_result.get('anchors_found', 0) > 0 and not gov_rows:
+                parse_failures += 1
+                strategy_log['sources'][-1]['status'] = 'parse_failure'
+                strategy_log['sources'][-1]['detail'] = 'anchors_without_valid_rows'
+            LOGGER.info('materials.source.done registro=%s strategy=%s fonte=govbr rows=%s', registro, strategy.name, len(gov_rows))
         except requests.Timeout:
             had_errors = True
+            blocked_sources += 1
+            strategy_log['sources'].append({'source': 'govbr', 'status': 'timeout', 'rows': 0})
             LOGGER.warning('materials.timeout registro=%s fonte=govbr strategy=%s', registro, strategy.name)
         except requests.RequestException as exc:
             had_errors = True
+            blocked_sources += 1
+            strategy_log['sources'].append({'source': 'govbr', 'status': 'blocked_source', 'rows': 0, 'error': str(exc)})
             LOGGER.warning('materials.error registro=%s fonte=govbr strategy=%s erro=%s', registro, strategy.name, exc)
 
         try:
-            rows.extend(_parse_duckduckgo_page(strategy.query))
+            duck_result = _parse_duckduckgo_page(strategy.query)
+            duck_rows = duck_result['rows']
+            rows.extend(duck_rows)
+            strategy_log['sources'].append({'source': 'duckduckgo', 'status': 'ok', 'rows': len(duck_rows), 'blocks': duck_result.get('blocks_found', 0)})
+            if duck_result.get('blocks_found', 0) > 0 and not duck_rows:
+                parse_failures += 1
+                strategy_log['sources'][-1]['status'] = 'parse_failure'
+                strategy_log['sources'][-1]['detail'] = 'blocks_without_valid_rows'
+            LOGGER.info('materials.source.done registro=%s strategy=%s fonte=duckduckgo rows=%s', registro, strategy.name, len(duck_rows))
         except requests.Timeout:
             had_errors = True
+            blocked_sources += 1
+            strategy_log['sources'].append({'source': 'duckduckgo', 'status': 'timeout', 'rows': 0})
             LOGGER.warning('materials.timeout registro=%s fonte=duckduckgo strategy=%s', registro, strategy.name)
         except requests.RequestException as exc:
             had_errors = True
+            blocked_sources += 1
+            strategy_log['sources'].append({'source': 'duckduckgo', 'status': 'blocked_source', 'rows': 0, 'error': str(exc)})
             LOGGER.warning('materials.error registro=%s fonte=duckduckgo strategy=%s erro=%s', registro, strategy.name, exc)
+
+        strategy_log['raw_rows'] = len(rows)
+        total_rows_collected += len(rows)
+        LOGGER.info('materials.strategy.collected registro=%s strategy=%s rows=%s', registro, strategy.name, len(rows))
 
         for row in rows[:MATERIALS_MAX_ROWS_PER_STRATEGY]:
             if time.perf_counter() >= deadline:
@@ -530,7 +630,23 @@ def find_related_materials(registro: str, product: dict[str, Any] | None = None)
             )
             if evaluated:
                 ranked.append(evaluated)
+                strategy_log['accepted'] += 1
+            else:
+                strategy_log['filtered_out'] += 1
+                total_filtered_out += 1
+                reason = row.get('discard_reason', 'unknown')
+                discard_reasons[reason] = discard_reasons.get(reason, 0) + 1
             total_rows_processed += 1
+
+        LOGGER.info(
+            'materials.strategy.done registro=%s strategy=%s raw=%s accepted=%s filtered=%s',
+            registro,
+            strategy.name,
+            strategy_log['raw_rows'],
+            strategy_log['accepted'],
+            strategy_log['filtered_out'],
+        )
+        strategy_logs.append(strategy_log)
 
         if total_rows_processed >= MATERIALS_MAX_TOTAL_ROWS:
             break
@@ -543,28 +659,69 @@ def find_related_materials(registro: str, product: dict[str, Any] | None = None)
     deduped = _dedupe_items(ranked)
     duration_ms = int((time.perf_counter() - started_at) * 1000)
     LOGGER.info(
-        'materials.done registro=%s resultados=%s rows=%s sources=%s timeout=%s errors=%s duracao_ms=%s',
+        'materials.done registro=%s resultados=%s rows_processed=%s rows_collected=%s filtered=%s sources=%s timeout=%s errors=%s parse_failures=%s blocked_sources=%s duracao_ms=%s discard_reasons=%s',
         registro,
         len(deduped),
         total_rows_processed,
+        total_rows_collected,
+        total_filtered_out,
         len(visited_urls),
         timeout_reached,
         had_errors,
+        parse_failures,
+        blocked_sources,
         duration_ms,
+        discard_reasons,
     )
 
+    status = 'ok'
+    warning = None
+    if timeout_reached:
+        status = 'timeout'
+        warning = MATERIALS_AUTOSEARCH_WARNING
+    elif blocked_sources and not deduped:
+        status = 'blocked_source'
+        warning = MATERIALS_AUTOSEARCH_WARNING
+    elif parse_failures and not deduped:
+        status = 'parse_failure'
+        warning = MATERIALS_AUTOSEARCH_WARNING
+    elif not deduped and total_filtered_out > 0:
+        status = 'filtered_out'
+        warning = 'A busca encontrou itens brutos, mas todos foram descartados pelos critérios de relevância.'
+    elif not deduped:
+        status = 'no_results'
+        warning = 'Nenhum material técnico público relevante foi encontrado para este produto.'
+    elif len(deduped) < min(3, MATERIALS_EARLY_STOP_RESULTS):
+        status = 'partial_results'
+        warning = 'A busca retornou poucos materiais estruturados; use também as pesquisas recomendadas.'
+
+    diagnostics = {
+        'status': status,
+        'rows_processed': total_rows_processed,
+        'rows_collected': total_rows_collected,
+        'filtered_out': total_filtered_out,
+        'discard_reasons': discard_reasons,
+        'timeout_reached': timeout_reached,
+        'blocked_sources': blocked_sources,
+        'parse_failures': parse_failures,
+        'strategies': strategy_logs,
+    }
+
     if not deduped:
-        warning = MATERIALS_TIMEOUT_WARNING if timeout_reached else 'Nenhum material técnico público relevante foi encontrado para este produto.'
-        if had_errors and not timeout_reached:
-            warning = MATERIALS_TIMEOUT_WARNING
         return {
             'items': [],
+            'status': status,
             'warning': warning,
             'source': visited_urls,
+            'recommended_searches': recommended_searches,
+            'diagnostics': diagnostics,
         }
 
     return {
         'items': deduped[:12],
-        'warning': MATERIALS_TIMEOUT_WARNING if timeout_reached else None,
+        'status': status,
+        'warning': warning,
         'source': visited_urls,
+        'recommended_searches': recommended_searches,
+        'diagnostics': diagnostics,
     }
