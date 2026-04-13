@@ -10,6 +10,7 @@ from bs4 import BeautifulSoup
 from app.core.config import REQUEST_TIMEOUT, SSL_VERIFY, USER_AGENT
 
 GOVBR_SEARCH_URL = 'https://www.gov.br/anvisa/pt-br/search'
+DUCKDUCKGO_HTML_URL = 'https://duckduckgo.com/html/'
 
 PRIORITY_TERMS: list[tuple[str, str, int]] = [
     ('manual de serviço', 'manual de serviço', 140),
@@ -40,6 +41,17 @@ GENERIC_NOISE = {
     'transparencia',
 }
 
+BLOCKED_DOMAINS = {
+    'facebook.com',
+    'instagram.com',
+    'linkedin.com',
+    'tiktok.com',
+    'youtube.com',
+    'wikipedia.org',
+    'mercadolivre.com.br',
+    'shopee.com.br',
+}
+
 
 def _clean(value: Any) -> str:
     return str(value or '').strip()
@@ -48,6 +60,11 @@ def _clean(value: Any) -> str:
 def _safe_domain(href: str) -> bool:
     domain = urlparse(href).netloc.lower()
     return domain.endswith('gov.br') or domain.endswith('anvisa.gov.br')
+
+
+def _is_blocked_domain(href: str) -> bool:
+    domain = urlparse(href).netloc.lower().lstrip('www.')
+    return any(domain.endswith(item) for item in BLOCKED_DOMAINS)
 
 
 def _normalize_tokens(*values: str) -> list[str]:
@@ -62,6 +79,17 @@ def _normalize_tokens(*values: str) -> list[str]:
                 continue
             tokens.append(token)
     return tokens
+
+
+def _manufacturer_domain_candidates(product: dict[str, Any]) -> list[str]:
+    fabricante = _clean(product.get('fabricante'))
+    empresa = _clean((product.get('empresa') or {}).get('razaoSocial'))
+    raw = f'{fabricante} {empresa}'.casefold()
+    sanitized = re.sub(r'[^a-z0-9 ]+', ' ', raw)
+    tokens = [token for token in sanitized.split() if len(token) > 2]
+    if not tokens:
+        return []
+    return [tokens[0], ''.join(tokens[:2])]
 
 
 def _build_queries(registro: str, product: dict[str, Any]) -> list[str]:
@@ -140,10 +168,46 @@ def _parse_search_page(search_url: str) -> list[dict[str, str]]:
     return rows
 
 
+def _parse_duckduckgo_page(query: str) -> list[dict[str, str]]:
+    headers = {'User-Agent': USER_AGENT, 'Accept': 'text/html,*/*'}
+    response = requests.get(
+        DUCKDUCKGO_HTML_URL,
+        params={'q': query},
+        timeout=REQUEST_TIMEOUT,
+        verify=SSL_VERIFY,
+        headers=headers,
+    )
+    response.raise_for_status()
+
+    soup = BeautifulSoup(response.text, 'html.parser')
+    rows: list[dict[str, str]] = []
+
+    for block in soup.select('.result'):
+        anchor = block.select_one('.result__a')
+        if not anchor:
+            continue
+        href = _clean(anchor.get('href'))
+        title = anchor.get_text(' ', strip=True)
+        snippet = _clean(block.get_text(' ', strip=True))
+        if not href or not title or _is_blocked_domain(href):
+            continue
+        rows.append(
+            {
+                'titulo': title,
+                'link': href,
+                'resumo': snippet[:380],
+                'contexto': f'{title} {snippet}'.casefold(),
+                'fonte': urlparse(href).netloc.lower(),
+            }
+        )
+    return rows
+
+
 def _classify_and_score(
     row: dict[str, str],
     registro: str,
     product_tokens: list[str],
+    manufacturer_domains: list[str],
 ) -> dict[str, Any] | None:
     context = row['contexto']
 
@@ -168,7 +232,14 @@ def _classify_and_score(
         if token and token in context:
             token_hits += 1
 
-    score += min(token_hits * 12, 60)
+    score += min(token_hits * 14, 70)
+
+    domain = row.get('fonte', '')
+    link = row.get('link', '').casefold()
+    if any(domain.startswith(candidate) or candidate in domain for candidate in manufacturer_domains):
+        score += 35
+    if link.endswith('.pdf'):
+        score += 15
 
     if exact_registration:
         score += 90
@@ -217,6 +288,7 @@ def find_related_materials(registro: str, product: dict[str, Any] | None = None)
         product.get('fabricante'),
         (product.get('empresa') or {}).get('razaoSocial'),
     )
+    manufacturer_domains = _manufacturer_domain_candidates(product)
 
     ranked: list[dict[str, Any]] = []
     visited_urls: list[str] = []
@@ -228,10 +300,20 @@ def find_related_materials(registro: str, product: dict[str, Any] | None = None)
         try:
             rows = _parse_search_page(search_url)
         except requests.RequestException:
-            continue
+            rows = []
+
+        try:
+            rows.extend(_parse_duckduckgo_page(query))
+        except requests.RequestException:
+            pass
 
         for row in rows:
-            evaluated = _classify_and_score(row, registro=registro, product_tokens=product_tokens)
+            evaluated = _classify_and_score(
+                row,
+                registro=registro,
+                product_tokens=product_tokens,
+                manufacturer_domains=manufacturer_domains,
+            )
             if evaluated:
                 ranked.append(evaluated)
 
@@ -249,11 +331,11 @@ def find_related_materials(registro: str, product: dict[str, Any] | None = None)
         return {
             'items': [],
             'warning': 'Nenhum material técnico público relevante foi encontrado para este produto.',
-            'source': visited_urls,
+            'source': [],
         }
 
     return {
         'items': deduped[:12],
         'warning': None,
-        'source': visited_urls,
+        'source': [],
     }

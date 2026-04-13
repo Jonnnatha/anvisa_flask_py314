@@ -50,6 +50,32 @@ def _extract_models(alerts: list[dict[str, Any]]) -> list[str]:
     return _unique(strong)[:8]
 
 
+def _extract_models_from_documents(indexed_documents: list[dict[str, Any]]) -> list[str]:
+    chunks: list[str] = []
+    for item in indexed_documents:
+        if not isinstance(item, dict):
+            continue
+        text = ' '.join(
+            str(item.get(key) or '')
+            for key in ('modelo', 'model', 'titulo', 'resumo')
+        )
+        for match in re.findall(r'(?:modelo|model)\s*[:\-]?\s*([A-Za-z0-9][A-Za-z0-9\-/\.]{1,24})', text, flags=re.I):
+            chunks.append(match.strip())
+
+    return _unique(chunks)[:8]
+
+
+def _extract_brands_from_documents(indexed_documents: list[dict[str, Any]]) -> list[str]:
+    chunks: list[str] = []
+    for item in indexed_documents:
+        if not isinstance(item, dict):
+            continue
+        text = ' '.join(str(item.get(key) or '') for key in ('titulo', 'resumo'))
+        for match in re.findall(r'(?:marca|brand)\s*[:\-]?\s*([A-Za-z0-9][A-Za-z0-9 .&-]{1,40})', text, flags=re.I):
+            chunks.append(match.strip())
+    return _unique(chunks)[:6]
+
+
 def build_consolidated_product_data(official_data: dict[str, Any], enriched_data: dict[str, Any]) -> dict[str, Any]:
     ordered_fields = [
         ('numero_registro', 'Número do registro'),
@@ -110,13 +136,17 @@ def enrich_product_data(
     alert_tipo = _unique([item.get('tipo_produto') for item in alerts])
     alert_risco = _unique([item.get('classe_risco') for item in alerts])
 
-    doc_models = _unique([doc.get('modelo') or doc.get('model') for doc in indexed_documents if isinstance(doc, dict)])
+    doc_models = _unique([
+        *[doc.get('modelo') or doc.get('model') for doc in indexed_documents if isinstance(doc, dict)],
+        *_extract_models_from_documents(indexed_documents),
+    ])
+    doc_brands = _extract_brands_from_documents(indexed_documents)
     doc_manufacturers = _unique([
         doc.get('fabricante') or doc.get('manufacturer') for doc in indexed_documents if isinstance(doc, dict)
     ])
 
-    brand = official_brand or (alert_brands[0] if alert_brands else '')
-    model = official_model or (alert_models[0] if alert_models else '')
+    brand = official_brand or (alert_brands[0] if alert_brands else '') or (doc_brands[0] if doc_brands else '')
+    model = official_model or (alert_models[0] if alert_models else '') or (doc_models[0] if doc_models else '')
 
     manufacturer = official_manufacturer
     if not manufacturer:
