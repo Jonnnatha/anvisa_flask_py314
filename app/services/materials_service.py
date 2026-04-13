@@ -5,7 +5,7 @@ import time
 import logging
 from dataclasses import dataclass
 from typing import Any
-from urllib.parse import parse_qs, quote_plus, urlparse
+from urllib.parse import parse_qs, quote_plus, unquote, urlparse
 
 import requests
 from bs4 import BeautifulSoup
@@ -387,6 +387,14 @@ def _parse_duckduckgo_page(query: str) -> dict[str, Any]:
         href = _clean(anchor.get('href'))
         title = anchor.get_text(' ', strip=True)
         snippet = _clean(block.get_text(' ', strip=True))
+        if href.startswith('//duckduckgo.com/l/?'):
+            parsed_duck = urlparse(f'https:{href}')
+            resolved = parse_qs(parsed_duck.query).get('uddg', [''])[0]
+            href = _clean(unquote(resolved))
+        elif href.startswith('https://duckduckgo.com/l/?'):
+            parsed_duck = urlparse(href)
+            resolved = parse_qs(parsed_duck.query).get('uddg', [''])[0]
+            href = _clean(unquote(resolved))
         if not href or not title or _is_blocked_domain(href):
             continue
         rows.append(
@@ -646,7 +654,7 @@ def _dedupe_items(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
     seen_links: set[str] = set()
     seen_title_domain: set[str] = set()
 
-    for item in sorted(items, key=lambda x: x['score'], reverse=True):
+    for item in sorted(items, key=lambda x: x.get('score', 0), reverse=True):
         parsed = urlparse(item['link'])
         clean_path = re.sub(r'/+', '/', parsed.path.rstrip('/'))
         link_key = _normalize(f'{parsed.scheme}://{parsed.netloc}{clean_path}')
@@ -708,6 +716,7 @@ def _fallback_from_rows(rows: list[dict[str, str]], identity: dict[str, str]) ->
                 'link': link,
                 'resumo': snippet,
                 'nivel_confianca': 'baixo',
+                'score': 50,
             }
         )
     return fallback_items
