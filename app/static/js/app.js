@@ -52,15 +52,10 @@ function render(data) {
   }).filter(Boolean).join('');
 
   const alertsHtml = alerts.length
-    ? alerts.map(item => `
-      <article class="alert-item alert-item-partial">
-        <h4>Alerta ${escapeHtml(item.numero_alerta || '')}</h4>
-        ${item.data ? `<div class="meta">${escapeHtml(item.data)}</div>` : ''}
-        ${item.titulo ? `<p>${escapeHtml(item.titulo)}</p>` : ''}
-        ${(item.url && item.url !== '#') ? `<a href="${escapeHtml(item.url)}" target="_blank" rel="noopener noreferrer">Abrir referência do alerta</a>` : ''}
-      </article>
-    `).join('')
-    : '<p>Nenhum alerta associado ao registro foi encontrado.</p>';
+    ? `<div class="field"><span>Números dos alertas</span><strong>${escapeHtml(
+      alerts.map(item => item.numero_alerta).filter(Boolean).join(' · ')
+    )}</strong></div>`
+    : '<p>Nenhum alerta encontrado para este registro.</p>';
 
   const materialsHtml = materials.length
     ? materials.map(item => `
@@ -81,13 +76,11 @@ function render(data) {
 
     <div class="box">
       <h2>Alertas (${alerts.length})</h2>
-      ${data.alerts_warning ? `<div class="feedback warning">${escapeHtml(data.alerts_warning)}</div>` : ''}
       ${alertsHtml}
     </div>
 
     <div class="box">
       <h2>Materiais / sinais públicos úteis (${materials.length})</h2>
-      ${data.materials_warning ? `<div class="feedback warning">${escapeHtml(data.materials_warning)}</div>` : ''}
       ${materialsHtml}
     </div>
   `;

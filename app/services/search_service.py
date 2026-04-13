@@ -27,12 +27,6 @@ def _build_base_response(registro: str) -> dict[str, Any]:
     return {
         'registro_anvisa': registro,
         'found': False,
-        'origens': {
-            'produto': 'API oficial ANVISA (POST /consulta/saude)',
-            'enriquecimento': 'Consolidação inteligente com sinais públicos confiáveis',
-            'alertas': 'Pesquisa de alertas por registro',
-            'materiais': 'Pesquisa de materiais técnicos relevantes',
-        },
         'product': None,
         'official_data': {},
         'enriched_data': {},
@@ -92,11 +86,8 @@ def search_by_registration(value: str) -> dict[str, Any]:
             'product_data': enrichment_result.get('consolidated_product_data', {}),
             'alerts_count': alerts_result.get('count', 0),
             'alerts_status': alerts_result.get('status'),
-            'alerts_warning': alerts_result.get('warning'),
-            'alerts_sync': alerts_result.get('sync'),
             'alerts': alerts_result.get('alerts', []),
             'materials_or_signals': materials_result.get('items', []),
-            'materials_warning': materials_result.get('warning'),
             'materials_source': materials_result.get('source'),
         }
     )

@@ -52,6 +52,13 @@ BLOCKED_DOMAINS = {
     'shopee.com.br',
 }
 
+BLOCKED_URL_PATTERNS = (
+    '/search',
+    '/busca',
+    '/tag/',
+    '/category/',
+)
+
 
 def _clean(value: Any) -> str:
     return str(value or '').strip()
@@ -105,13 +112,21 @@ def _build_queries(registro: str, product: dict[str, Any]) -> list[str]:
 
     query_templates = [
         f'{registro} {nome_produto} manual',
+        f'{registro} {nome_produto} IFU',
+        f'{registro} {nome_produto} instruções de uso',
+        f'{registro} {nome_produto} service manual',
         f'{registro} {nome_produto} instruções de uso',
         f'{fabricante} {modelo} manual de serviço',
+        f'{fabricante} {modelo} service manual',
         f'{marca} {modelo} IFU',
+        f'{marca} {modelo} instruções de uso',
         f'{fabricante} {modelo} training',
+        f'{fabricante} {modelo} catálogo técnico',
+        f'{fabricante} {modelo} boletim técnico',
         f'{fabricante} {modelo} recall',
         f'{fabricante} {modelo} field safety notice',
         f'{fabricante} {modelo} field corrective action',
+        f'{fabricante} {modelo} field safety corrective action',
         f'{nome_tecnico} {fabricante} instruções de uso',
         f'{compact_base} catálogo técnico',
         f'{compact_base} boletim técnico',
@@ -129,7 +144,7 @@ def _build_queries(registro: str, product: dict[str, Any]) -> list[str]:
         seen.add(key)
         result.append(q)
 
-    return result[:8]
+    return result[:12]
 
 
 def _parse_search_page(search_url: str) -> list[dict[str, str]]:
@@ -213,6 +228,8 @@ def _classify_and_score(
 
     if any(noise in context for noise in GENERIC_NOISE):
         return None
+    if any(pattern in row.get('link', '').casefold() for pattern in BLOCKED_URL_PATTERNS):
+        return None
 
     best_label = ''
     score = 0
@@ -250,9 +267,15 @@ def _classify_and_score(
     elif score >= 135:
         confidence = 'medio'
 
+    strong_identity_hit = any(
+        token and token in context
+        for token in product_tokens
+        if len(token) >= 4
+    )
+
     # Regra de qualidade: só retorna com evidência forte.
-    # Forte = registro explícito OU ao menos dois tokens relevantes do produto.
-    if not exact_registration and token_hits < 2:
+    # Forte = registro explícito OU (tokens relevantes + identidade do produto).
+    if not exact_registration and (token_hits < 2 or not strong_identity_hit):
         return None
 
     if confidence == 'baixo':
@@ -288,6 +311,8 @@ def find_related_materials(registro: str, product: dict[str, Any] | None = None)
         product.get('fabricante'),
         (product.get('empresa') or {}).get('razaoSocial'),
     )
+    if len(product_tokens) > 18:
+        product_tokens = product_tokens[:18]
     manufacturer_domains = _manufacturer_domain_candidates(product)
 
     ranked: list[dict[str, Any]] = []
