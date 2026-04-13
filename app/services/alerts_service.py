@@ -10,7 +10,7 @@ import requests
 from app.core.config import ALERTS_BRUNOROMA_BASE_URL, REQUEST_TIMEOUT, SSL_VERIFY
 
 LOGGER = logging.getLogger(__name__)
-ANVISA_SEARCH_URL = 'https://www.gov.br/anvisa/pt-br/search'
+GOOGLE_SEARCH_URL = 'https://www.google.com/search'
 
 
 def _normalize_registro(value: str) -> str:
@@ -45,8 +45,8 @@ def _build_alert_lookup_link(numero_alerta: str) -> str:
     cleaned = _clean(numero_alerta)
     if not cleaned:
         return ''
-    query = quote_plus(f'alerta {cleaned}')
-    return f'{ANVISA_SEARCH_URL}?SearchableText={query}'
+    query = quote_plus(f'alerta anvisa {cleaned}')
+    return f'{GOOGLE_SEARCH_URL}?q={query}'
 
 
 def _parse_alerts_payload(payload: Any) -> list[dict[str, Any]]:
