@@ -123,3 +123,24 @@ small { display: block; margin-top: 10px; color: var(--muted); }
 .alert-item-partial {
   border-left: 4px solid #f59e0b;
 }
+
+.recommended-searches {
+  margin-top: 14px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: rgba(17, 24, 39, 0.6);
+}
+
+.recommended-searches h4 {
+  margin: 0 0 8px;
+}
+
+.recommended-searches ul {
+  margin: 8px 0 0;
+  padding-left: 18px;
+}
+
+.recommended-searches a {
+  color: #93c5fd;
+}

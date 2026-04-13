@@ -40,6 +40,9 @@ def _build_base_response(registro: str) -> dict[str, Any]:
         'alerts_count': 0,
         'alerts': [],
         'materials_or_signals': [],
+        'materials_status': 'no_results',
+        'materials_recommended_searches': [],
+        'materials_diagnostics': {},
     }
 
 
@@ -91,7 +94,14 @@ def search_by_registration(value: str) -> dict[str, Any]:
     enrichment_result = enrich_product_data(product, alerts=alerts_result.get('alerts', []))
     materials_product_context = dict(product)
     materials_product_context.update(enrichment_result.get('enriched_data', {}))
-    materials_result: dict[str, Any] = {'items': [], 'warning': MATERIALS_TIMEOUT_WARNING, 'source': []}
+    materials_result: dict[str, Any] = {
+        'items': [],
+        'status': 'timeout',
+        'warning': MATERIALS_TIMEOUT_WARNING,
+        'source': [],
+        'recommended_searches': [],
+        'diagnostics': {},
+    }
     materials_started = time.perf_counter()
     try:
         with ThreadPoolExecutor(max_workers=1) as executor:
@@ -100,10 +110,24 @@ def search_by_registration(value: str) -> dict[str, Any]:
         LOGGER.info('search.materials.success registro=%s duracao_ms=%s', registro, int((time.perf_counter() - materials_started) * 1000))
     except FutureTimeoutError:
         LOGGER.warning('search.materials.timeout registro=%s timeout_s=%s', registro, MATERIALS_TOTAL_TIMEOUT + 1)
-        materials_result = {'items': [], 'warning': MATERIALS_TIMEOUT_WARNING, 'source': []}
+        materials_result = {
+            'items': [],
+            'status': 'timeout',
+            'warning': MATERIALS_TIMEOUT_WARNING,
+            'source': [],
+            'recommended_searches': [],
+            'diagnostics': {'status': 'timeout', 'reason': 'future_timeout'},
+        }
     except Exception as exc:
         LOGGER.exception('search.materials.error registro=%s erro=%s', registro, exc)
-        materials_result = {'items': [], 'warning': MATERIALS_TIMEOUT_WARNING, 'source': []}
+        materials_result = {
+            'items': [],
+            'status': 'blocked_source',
+            'warning': MATERIALS_TIMEOUT_WARNING,
+            'source': [],
+            'recommended_searches': [],
+            'diagnostics': {'status': 'blocked_source', 'reason': str(exc)},
+        }
 
     enrichment_result = enrich_product_data(
         product,
@@ -125,7 +149,10 @@ def search_by_registration(value: str) -> dict[str, Any]:
             'alerts': alerts_result.get('alerts', []),
             'materials_or_signals': materials_result.get('items', []),
             'materials_source': materials_result.get('source'),
+            'materials_status': materials_result.get('status', 'no_results'),
             'materials_warning': materials_result.get('warning'),
+            'materials_recommended_searches': materials_result.get('recommended_searches', []),
+            'materials_diagnostics': materials_result.get('diagnostics', {}),
         }
     )
     LOGGER.info('search.done registro=%s found=%s duracao_ms=%s', registro, result.get('found', False), int((time.perf_counter() - started_at) * 1000))

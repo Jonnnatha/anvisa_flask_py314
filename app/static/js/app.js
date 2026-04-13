@@ -94,6 +94,25 @@ function renderMaterial(item) {
   `;
 }
 
+function renderRecommendedSearches(searches) {
+  const valid = Array.isArray(searches) ? searches.filter(item => item?.url && item?.query) : [];
+  if (!valid.length) return '';
+  const links = valid.map((item) => `
+    <li>
+      <a href="${escapeHtml(item.url)}" target="_blank" rel="noopener noreferrer">
+        ${escapeHtml(item.query)}
+      </a>
+    </li>
+  `).join('');
+  return `
+    <div class="recommended-searches">
+      <h4>Pesquisas recomendadas</h4>
+      <p>Use as consultas abaixo para investigar o produto manualmente.</p>
+      <ul>${links}</ul>
+    </div>
+  `;
+}
+
 function render(data) {
   const productData = data.product_data || {};
   const labels = productData.labels || {};
@@ -101,7 +120,11 @@ function render(data) {
   const payload = productData.data || {};
   const alerts = Array.isArray(data.alerts) ? data.alerts : [];
   const materials = Array.isArray(data.materials_or_signals) ? data.materials_or_signals : [];
+  const materialsStatus = String(data.materials_status || '').trim();
   const materialsWarning = String(data.materials_warning || '').trim();
+  const recommendedSearches = Array.isArray(data.materials_recommended_searches)
+    ? data.materials_recommended_searches
+    : [];
 
   const productFields = fieldsOrder.map((key) => {
     if (Array.isArray(payload[key])) {
@@ -112,9 +135,22 @@ function render(data) {
 
   const alertsHtml = renderAlertLinks(alerts);
 
+  const fallbackByStatus = {
+    no_results: 'Nenhum material técnico público relevante foi encontrado para este produto.',
+    timeout: 'A busca automática de materiais expirou por tempo nesta consulta.',
+    blocked_source: 'A busca automática foi bloqueada por uma fonte externa nesta consulta.',
+    parse_failure: 'A busca automática recebeu resposta, mas não conseguiu interpretar o conteúdo.',
+    filtered_out: 'A busca encontrou itens, mas todos foram descartados no filtro inicial de relevância.',
+    partial_results: 'A busca encontrou materiais parciais; considere usar também as pesquisas recomendadas.',
+  };
+
+  const statusMessage = fallbackByStatus[materialsStatus] || '';
+  const primaryMessage = materialsWarning || statusMessage;
+  const showRecommended = !materials.length || materialsStatus === 'partial_results';
+  const recommendedHtml = showRecommended ? renderRecommendedSearches(recommendedSearches) : '';
   const materialsHtml = materials.length
-    ? materials.map(renderMaterial).join('')
-    : `<p>${escapeHtml(materialsWarning || 'Nenhum material técnico público relevante foi encontrado para este produto.')}</p>`;
+    ? `${primaryMessage ? `<p>${escapeHtml(primaryMessage)}</p>` : ''}${materials.map(renderMaterial).join('')}${recommendedHtml}`
+    : `<p>${escapeHtml(primaryMessage || 'Não foi possível concluir a busca automática de materiais nesta consulta.')}</p>${recommendedHtml}`;
 
   resultado.innerHTML = `
     <div class="box">
