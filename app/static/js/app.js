@@ -4,18 +4,31 @@ const resultado = document.getElementById('resultado');
 const REQUEST_TIMEOUT_MS = 30000;
 
 const materialTypeLabels = {
+  pdf: 'PDF',
   manual: 'Manual',
   ifu: 'IFU / Instruções de uso',
   service_manual: 'Manual de serviço',
   training: 'Treinamento',
+  complaint: 'Reclamação pública',
+  forum: 'Discussão em fórum',
   catalog: 'Catálogo técnico',
   recall: 'Recall',
   safety_notice: 'Safety notice',
   field_corrective_action: 'Field corrective action',
   technical_bulletin: 'Boletim técnico',
   manufacturer_document: 'Documento do fabricante',
+  technical_document: 'Documento técnico',
   public_signal: 'Sinal público',
 };
+
+function materialBadge(item) {
+  const typeLabel = materialTypeLabels[item.tipo] || item.tipo || 'Material';
+  if (item.is_pdf && item.tipo === 'manual') return 'Manual PDF';
+  if (item.is_pdf && item.tipo === 'ifu') return 'IFU PDF';
+  if (item.is_pdf && item.tipo === 'service_manual') return 'Service Manual PDF';
+  if (item.is_pdf) return 'PDF';
+  return typeLabel;
+}
 
 function setFeedback(message, type = 'ok') {
   feedback.textContent = message;
@@ -80,14 +93,19 @@ function renderAlertLinks(alerts) {
 }
 
 function renderMaterial(item) {
-  const tipo = materialTypeLabels[item.tipo] || item.tipo || 'Não classificado';
+  const tipo = materialBadge(item);
   const fonte = item.fonte || 'Fonte pública';
   const resumo = String(item.resumo || '').trim();
+  const badgeClass = item.is_pdf ? 'material-badge is-pdf' : 'material-badge';
+  const itemClass = item.is_pdf ? 'alert-item alert-item-partial material-item pdf-priority' : 'alert-item alert-item-partial material-item';
 
   return `
-    <article class="alert-item alert-item-partial">
+    <article class="${itemClass}">
       <h4>${escapeHtml(item.titulo || 'Documento técnico')}</h4>
-      <div class="meta">Tipo: ${escapeHtml(tipo)} · Fonte: ${escapeHtml(fonte)} · Confiança: ${escapeHtml(item.nivel_confianca || 'medio')}</div>
+      <div class="meta">
+        <span class="${badgeClass}">${escapeHtml(tipo)}</span>
+        <span>Fonte: ${escapeHtml(fonte)} · Confiança: ${escapeHtml(item.nivel_confianca || 'medio')}</span>
+      </div>
       ${resumo ? `<p>${escapeHtml(resumo)}</p>` : ''}
       <a href="${escapeHtml(item.link)}" target="_blank" rel="noopener noreferrer">Abrir material</a>
     </article>
