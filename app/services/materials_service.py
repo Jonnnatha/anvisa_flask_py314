@@ -86,6 +86,20 @@ BLOCKED_URL_PATTERNS = (
     '/noticias',
 )
 
+USEFUL_TERMS = (
+    'manual',
+    'instruções de uso',
+    'instrucoes de uso',
+    'instructions for use',
+    'ifu',
+    'service manual',
+    'training',
+    'recall',
+    'safety notice',
+    'field corrective action',
+    'fsca',
+)
+
 LOGGER = logging.getLogger(__name__)
 MATERIALS_AUTOSEARCH_WARNING = 'Não foi possível concluir a busca automática de materiais nesta consulta.'
 
@@ -371,6 +385,26 @@ def _classify_type(context: str) -> str:
     return best
 
 
+def _domain_relevance_score(domain: str, manufacturer_domains: list[str]) -> int:
+    normalized = _clean(domain).lower()
+    if not normalized:
+        return 0
+    if normalized.endswith('anvisa.gov.br') or normalized.endswith('gov.br'):
+        return 90
+    if any(candidate and candidate in normalized for candidate in manufacturer_domains):
+        return 76
+    if any(token in normalized for token in ('docs', 'manual', 'support', 'technical', 'product')):
+        return 52
+    if normalized.endswith('.gov') or normalized.endswith('.edu'):
+        return 45
+    return 22
+
+
+def _has_useful_term(*texts: str) -> bool:
+    haystack = ' '.join(_normalize(text) for text in texts if text)
+    return any(_contains_haystack(haystack, term) for term in USEFUL_TERMS)
+
+
 def _score_relevance(
     row: dict[str, str],
     registro: str,
@@ -380,6 +414,8 @@ def _score_relevance(
     strategy: SearchStrategy,
 ) -> dict[str, Any] | None:
     context = row['contexto']
+    title = _normalize(row.get('titulo', ''))
+    snippet = _normalize(row.get('resumo', ''))
     link = row['link'].casefold()
 
     if any(noise in context for noise in GENERIC_NOISE):
@@ -404,11 +440,21 @@ def _score_relevance(
             token_hits += 1
     score += min(token_hits * 11, 77)
 
-    product_hit = _contains_haystack(context, identity.get('nome_produto', '').casefold())
-    manufacturer_hit = _contains_haystack(context, identity.get('fabricante', '').casefold())
-    model_hit = _contains_haystack(context, identity.get('modelo', '').casefold())
-    brand_hit = _contains_haystack(context, identity.get('marca', '').casefold())
-    technical_name_hit = _contains_haystack(context, identity.get('nome_tecnico', '').casefold())
+    normalized_product_name = _normalize(identity.get('nome_produto', ''))
+    normalized_manufacturer = _normalize(identity.get('fabricante', ''))
+    normalized_model = _normalize(identity.get('modelo', ''))
+    normalized_brand = _normalize(identity.get('marca', ''))
+    normalized_technical_name = _normalize(identity.get('nome_tecnico', ''))
+
+    product_hit = _contains_haystack(context, normalized_product_name)
+    manufacturer_hit = _contains_haystack(context, normalized_manufacturer)
+    model_hit = _contains_haystack(context, normalized_model)
+    brand_hit = _contains_haystack(context, normalized_brand)
+    technical_name_hit = _contains_haystack(context, normalized_technical_name)
+    product_in_title = _contains_haystack(title, normalized_product_name)
+    product_in_snippet = _contains_haystack(snippet, normalized_product_name)
+    manufacturer_in_title_or_snippet = _contains_haystack(f'{title} {snippet}', normalized_manufacturer)
+    model_in_title_or_snippet = _contains_haystack(f'{title} {snippet}', normalized_model)
 
     if product_hit:
         score += 36
@@ -422,10 +468,20 @@ def _score_relevance(
         score += 14
 
     domain = row.get('fonte', '')
-    if any(candidate and candidate in domain for candidate in manufacturer_domains):
-        score += 30
+    domain_score = _domain_relevance_score(domain, manufacturer_domains)
+    score += domain_score
     if link.endswith('.pdf'):
         score += 18
+    if product_in_title:
+        score += 42
+    elif product_in_snippet:
+        score += 18
+    if manufacturer_in_title_or_snippet:
+        score += 16
+    if model_in_title_or_snippet:
+        score += 18
+    if _has_useful_term(title, snippet):
+        score += 30
 
     # Consultas da camada 1 têm maior peso e não devem falhar cedo.
     if strategy.layer == 1:
@@ -433,27 +489,38 @@ def _score_relevance(
     elif strategy.layer == 2:
         score += 8
 
-    strong_relation = exact_registration or (
-        (product_hit or technical_name_hit)
-        and (manufacturer_hit or model_hit or brand_hit)
-        and token_hits >= 2
-    ) or (
-        product_hit and token_hits >= 3
-    ) or (
-        manufacturer_hit and model_hit and token_hits >= 3
+    condition_a = product_in_title and _has_useful_term(title, snippet)
+    condition_b = manufacturer_in_title_or_snippet and (
+        product_in_title or product_in_snippet or model_in_title_or_snippet
     )
+    condition_c = domain_score >= 52 and (
+        product_hit
+        or technical_name_hit
+        or (model_hit and (manufacturer_hit or brand_hit))
+        or token_hits >= 3
+    )
+    strong_relation = exact_registration or condition_a or condition_b or condition_c
 
     if not strong_relation:
-        row['discard_reason'] = 'weak_relation'
-        return None
+        minimal_relation = (
+            product_hit
+            or model_hit
+            or technical_name_hit
+            or token_hits >= 2
+            or (manufacturer_hit and _has_useful_term(title, snippet))
+        )
+        if not minimal_relation:
+            row['discard_reason'] = 'weak_relation'
+            return None
+        score += 10
 
     confidence = 'baixo'
     if score >= 195:
         confidence = 'alto'
-    elif score >= 145:
+    elif score >= 128:
         confidence = 'medio'
 
-    if confidence == 'baixo':
+    if score < 98:
         row['discard_reason'] = 'low_confidence'
         return None
 
@@ -471,21 +538,21 @@ def _score_relevance(
 
 def _dedupe_items(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
     deduped: list[dict[str, Any]] = []
-    seen_keys: set[str] = set()
+    seen_links: set[str] = set()
+    seen_titles: set[str] = set()
 
     for item in sorted(items, key=lambda x: x['score'], reverse=True):
-        key = _normalize(item['link'])
-        if key in seen_keys:
+        link_key = _normalize(item['link'])
+        if link_key in seen_links:
             continue
 
         title_key = _normalize(re.sub(r'[^a-zA-Z0-9 ]+', ' ', item['titulo']))
-        near_dup = any(title_key and title_key in existing for existing in seen_keys)
-        if near_dup:
+        if title_key and title_key in seen_titles:
             continue
 
-        seen_keys.add(key)
+        seen_links.add(link_key)
         if title_key:
-            seen_keys.add(title_key)
+            seen_titles.add(title_key)
 
         item.pop('score', None)
         item.pop('strategy', None)
