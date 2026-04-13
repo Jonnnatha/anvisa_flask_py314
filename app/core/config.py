@@ -42,6 +42,10 @@ ANVISA_PRODUCT_API_URL = os.getenv(
 ANVISA_API_BASE_URL = os.getenv('ANVISA_API_BASE_URL', 'https://api-gateway.prd.apps.anvisa.gov.br/consultas-externas-api/api/v1')
 PRODUCTS_PAGE_URL = ANVISA_PRODUCT_API_URL
 ALERTS_PAGE_URL = 'https://antigo.anvisa.gov.br/alertas'
+ALERTS_BRUNOROMA_BASE_URL = os.getenv(
+    'ALERTS_BRUNOROMA_BASE_URL',
+    'https://brunoroma.pythonanywhere.com/registro',
+)
 
 ALERTS_DATA_FILE = DATA_DIR / 'anvisa_alertas.json'
 ALERTS_INDEX_FILE = DATA_DIR / 'anvisa_alertas_index.json'
@@ -55,4 +59,3 @@ USER_AGENT = os.getenv(
 )
 
 SSL_VERIFY = os.getenv('SSL_VERIFY', 'true').lower() in ('1', 'true', 'yes')
-

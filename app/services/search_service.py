@@ -29,9 +29,9 @@ def _build_base_response(registro: str) -> dict[str, Any]:
         'found': False,
         'origens': {
             'produto': 'API oficial ANVISA (POST /consulta/saude)',
-            'enriquecimento': 'Consolidação oficial + enriquecimento com evidência de alertas e sinais técnicos',
-            'alertas': 'Base local indexada de alertas da Anvisa (coleta estruturada assíncrona)',
-            'materiais': 'Busca pública guiada por contexto consolidado do produto',
+            'enriquecimento': 'Consolidação inteligente com sinais públicos confiáveis',
+            'alertas': 'Pesquisa de alertas por registro',
+            'materiais': 'Pesquisa de materiais técnicos relevantes',
         },
         'product': None,
         'official_data': {},
@@ -75,6 +75,11 @@ def search_by_registration(value: str) -> dict[str, Any]:
     materials_product_context = dict(product)
     materials_product_context.update(enrichment_result.get('enriched_data', {}))
     materials_result = find_related_materials(registro, product=materials_product_context)
+    enrichment_result = enrich_product_data(
+        product,
+        alerts=alerts_result.get('alerts', []),
+        indexed_documents=materials_result.get('items', []),
+    )
 
     result.update(
         {
@@ -87,7 +92,6 @@ def search_by_registration(value: str) -> dict[str, Any]:
             'product_data': enrichment_result.get('consolidated_product_data', {}),
             'alerts_count': alerts_result.get('count', 0),
             'alerts_status': alerts_result.get('status'),
-            'alerts_source': alerts_result.get('source'),
             'alerts_warning': alerts_result.get('warning'),
             'alerts_sync': alerts_result.get('sync'),
             'alerts': alerts_result.get('alerts', []),
