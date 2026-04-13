@@ -36,6 +36,7 @@ MATERIAL_TYPES: dict[str, tuple[str, ...]] = {
     'safety_notice': ('field safety notice', 'safety notice', 'aviso de segurança', 'aviso de seguranca'),
     'field_corrective_action': ('field corrective action', 'field safety corrective action', 'fsca'),
     'manufacturer_document': ('fabricante', 'manufacturer communication', 'nota técnica do fabricante', 'comunicado do fabricante'),
+    'technical_document': ('technical document', 'documento técnico', 'especificação técnica', 'instruction sheet'),
 }
 
 # Ordem de prioridade solicitada: manual > ifu > service_manual > training > catalog > recall ...
@@ -50,6 +51,7 @@ TYPE_PRIORITY = {
     'field_corrective_action': 114,
     'technical_bulletin': 108,
     'manufacturer_document': 100,
+    'technical_document': 96,
 }
 
 GENERIC_NOISE = {
@@ -373,7 +375,7 @@ def _parse_duckduckgo_page(query: str) -> dict[str, Any]:
 
 def _classify_type(context: str) -> str:
     haystack = f' {context} '
-    best = 'public_signal'
+    best = 'possible_material'
     best_score = 0
     for material_type, needles in MATERIAL_TYPES.items():
         for needle in needles:
@@ -514,48 +516,72 @@ def _score_relevance(
             return None
         score += 10
 
+    plausible_candidate = bool(
+        product_in_title
+        or product_in_snippet
+        or (
+            _has_useful_term(title, snippet)
+            and (product_hit or manufacturer_hit or model_hit or token_hits >= 2)
+        )
+        or (domain_score >= 52 and (product_hit or model_hit or manufacturer_hit))
+    )
+
+    if not strong_relation and plausible_candidate:
+        score += 12
+
     confidence = 'baixo'
-    if score >= 195:
+    if score >= 188:
         confidence = 'alto'
-    elif score >= 128:
+    elif score >= 118:
         confidence = 'medio'
 
-    if score < 98:
+    if score < 78 and not plausible_candidate:
         row['discard_reason'] = 'low_confidence'
         return None
 
+    item_type = material_type
+    if score < 102 or (not strong_relation and plausible_candidate):
+        item_type = 'possible_material'
+        if confidence == 'alto':
+            confidence = 'medio'
+
     return {
         'titulo': row['titulo'],
-        'tipo': material_type,
+        'tipo': item_type,
         'fonte': row['fonte'],
         'link': row['link'],
         'resumo': row['resumo'],
         'nivel_confianca': confidence,
         'strategy': strategy.name,
         'score': score,
+        'strong_relation': strong_relation,
     }
 
 
 def _dedupe_items(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
     deduped: list[dict[str, Any]] = []
     seen_links: set[str] = set()
-    seen_titles: set[str] = set()
+    seen_title_domain: set[str] = set()
 
     for item in sorted(items, key=lambda x: x['score'], reverse=True):
-        link_key = _normalize(item['link'])
+        parsed = urlparse(item['link'])
+        clean_path = re.sub(r'/+', '/', parsed.path.rstrip('/'))
+        link_key = _normalize(f'{parsed.scheme}://{parsed.netloc}{clean_path}')
         if link_key in seen_links:
             continue
 
         title_key = _normalize(re.sub(r'[^a-zA-Z0-9 ]+', ' ', item['titulo']))
-        if title_key and title_key in seen_titles:
+        title_domain_key = f"{item.get('fonte', '')}|{title_key}"
+        if title_key and title_domain_key in seen_title_domain:
             continue
 
         seen_links.add(link_key)
         if title_key:
-            seen_titles.add(title_key)
+            seen_title_domain.add(title_domain_key)
 
         item.pop('score', None)
         item.pop('strategy', None)
+        item.pop('strong_relation', None)
         deduped.append(item)
 
     return deduped
@@ -575,7 +601,7 @@ def find_related_materials(registro: str, product: dict[str, Any] | None = None)
     if not queries:
         return {
             'items': [],
-            'status': 'parse_failure',
+            'status': 'no_results',
             'warning': 'Nenhum termo suficiente foi encontrado para busca de materiais técnicos.',
             'source': [GOVBR_SEARCH_URL],
             'recommended_searches': recommended_searches,
@@ -698,11 +724,27 @@ def find_related_materials(registro: str, product: dict[str, Any] | None = None)
             if evaluated:
                 ranked.append(evaluated)
                 strategy_log['accepted'] += 1
+                LOGGER.info(
+                    'materials.item.scored registro=%s strategy=%s score=%s tipo=%s confidence=%s titulo="%s"',
+                    registro,
+                    strategy.name,
+                    evaluated.get('score'),
+                    evaluated.get('tipo'),
+                    evaluated.get('nivel_confianca'),
+                    evaluated.get('titulo', '')[:160],
+                )
             else:
                 strategy_log['filtered_out'] += 1
                 total_filtered_out += 1
                 reason = row.get('discard_reason', 'unknown')
                 discard_reasons[reason] = discard_reasons.get(reason, 0) + 1
+                LOGGER.info(
+                    'materials.item.discarded registro=%s strategy=%s reason=%s titulo="%s"',
+                    registro,
+                    strategy.name,
+                    reason,
+                    row.get('titulo', '')[:160],
+                )
             total_rows_processed += 1
 
         LOGGER.info(
@@ -741,26 +783,23 @@ def find_related_materials(registro: str, product: dict[str, Any] | None = None)
         discard_reasons,
     )
 
-    status = 'ok'
+    strong_items = [item for item in deduped if item.get('tipo') != 'possible_material']
+    status = 'materials_found' if strong_items else 'possible_materials_found'
     warning = None
     if timeout_reached:
-        status = 'timeout'
+        status = 'search_timeout'
         warning = MATERIALS_AUTOSEARCH_WARNING
     elif blocked_sources and not deduped:
-        status = 'blocked_source'
+        status = 'search_blocked'
         warning = MATERIALS_AUTOSEARCH_WARNING
     elif parse_failures and not deduped:
-        status = 'parse_failure'
+        status = 'search_blocked'
         warning = MATERIALS_AUTOSEARCH_WARNING
-    elif not deduped and total_filtered_out > 0:
-        status = 'filtered_out'
-        warning = 'A busca encontrou itens brutos, mas todos foram descartados pelos critérios de relevância.'
     elif not deduped:
         status = 'no_results'
         warning = 'Nenhum material técnico público relevante foi encontrado para este produto.'
-    elif len(deduped) < min(3, MATERIALS_EARLY_STOP_RESULTS):
-        status = 'partial_results'
-        warning = 'A busca retornou poucos materiais estruturados; use também as pesquisas recomendadas.'
+    elif status == 'possible_materials_found':
+        warning = 'A busca encontrou materiais plausíveis com menor confiança; valide os documentos antes do uso.'
 
     diagnostics = {
         'status': status,
@@ -785,7 +824,7 @@ def find_related_materials(registro: str, product: dict[str, Any] | None = None)
         }
 
     return {
-        'items': deduped[:12],
+        'items': deduped[:8],
         'status': status,
         'warning': warning,
         'source': visited_urls,

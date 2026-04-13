@@ -137,16 +137,15 @@ function render(data) {
 
   const fallbackByStatus = {
     no_results: 'Nenhum material técnico público relevante foi encontrado para este produto.',
-    timeout: 'A busca automática de materiais expirou por tempo nesta consulta.',
-    blocked_source: 'A busca automática foi bloqueada por uma fonte externa nesta consulta.',
-    parse_failure: 'A busca automática recebeu resposta, mas não conseguiu interpretar o conteúdo.',
-    filtered_out: 'A busca encontrou itens, mas todos foram descartados no filtro inicial de relevância.',
-    partial_results: 'A busca encontrou materiais parciais; considere usar também as pesquisas recomendadas.',
+    search_timeout: 'A busca automática de materiais expirou por tempo nesta consulta.',
+    search_blocked: 'A busca automática foi bloqueada por uma fonte externa nesta consulta.',
+    materials_found: '',
+    possible_materials_found: 'A busca encontrou materiais plausíveis com menor confiança; valide os documentos antes do uso.',
   };
 
   const statusMessage = fallbackByStatus[materialsStatus] || '';
   const primaryMessage = materialsWarning || statusMessage;
-  const showRecommended = !materials.length || materialsStatus === 'partial_results';
+  const showRecommended = !materials.length || materialsStatus === 'possible_materials_found';
   const recommendedHtml = showRecommended ? renderRecommendedSearches(recommendedSearches) : '';
   const materialsHtml = materials.length
     ? `${primaryMessage ? `<p>${escapeHtml(primaryMessage)}</p>` : ''}${materials.map(renderMaterial).join('')}${recommendedHtml}`
