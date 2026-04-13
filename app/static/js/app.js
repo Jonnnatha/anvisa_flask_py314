@@ -2,6 +2,20 @@ const form = document.getElementById('consulta-form');
 const feedback = document.getElementById('feedback');
 const resultado = document.getElementById('resultado');
 
+const materialTypeLabels = {
+  manual: 'Manual',
+  ifu: 'IFU / Instruções de uso',
+  service_manual: 'Manual de serviço',
+  training: 'Treinamento',
+  catalog: 'Catálogo técnico',
+  recall: 'Recall',
+  safety_notice: 'Safety notice',
+  field_corrective_action: 'Field corrective action',
+  technical_bulletin: 'Boletim técnico',
+  manufacturer_document: 'Documento do fabricante',
+  public_signal: 'Sinal público',
+};
+
 function setFeedback(message, type = 'ok') {
   feedback.textContent = message;
   feedback.className = `feedback ${type}`;
@@ -64,6 +78,21 @@ function renderAlertLinks(alerts) {
   return `<div class="alerts-chip-list">${chips}</div>`;
 }
 
+function renderMaterial(item) {
+  const tipo = materialTypeLabels[item.tipo] || item.tipo || 'Não classificado';
+  const fonte = item.fonte || 'Fonte pública';
+  const resumo = String(item.resumo || '').trim();
+
+  return `
+    <article class="alert-item alert-item-partial">
+      <h4>${escapeHtml(item.titulo || 'Documento técnico')}</h4>
+      <div class="meta">Tipo: ${escapeHtml(tipo)} · Fonte: ${escapeHtml(fonte)} · Confiança: ${escapeHtml(item.nivel_confianca || 'medio')}</div>
+      ${resumo ? `<p>${escapeHtml(resumo)}</p>` : ''}
+      <a href="${escapeHtml(item.link)}" target="_blank" rel="noopener noreferrer">Abrir material</a>
+    </article>
+  `;
+}
+
 function render(data) {
   const productData = data.product_data || {};
   const labels = productData.labels || {};
@@ -82,14 +111,7 @@ function render(data) {
   const alertsHtml = renderAlertLinks(alerts);
 
   const materialsHtml = materials.length
-    ? materials.map(item => `
-      <article class="alert-item alert-item-partial">
-        <h4>${escapeHtml(item.titulo)}</h4>
-        <div class="meta">Tipo: ${escapeHtml(item.tipo)} · Confiança: ${escapeHtml(item.nivel_confianca)}</div>
-        ${item.resumo ? `<p>${escapeHtml(item.resumo)}</p>` : ''}
-        <a href="${escapeHtml(item.link)}" target="_blank" rel="noopener noreferrer">Abrir material</a>
-      </article>
-    `).join('')
+    ? materials.map(renderMaterial).join('')
     : '<p>Nenhum material técnico público relevante foi encontrado para este produto.</p>';
 
   resultado.innerHTML = `
