@@ -3,12 +3,14 @@ from __future__ import annotations
 import logging
 import re
 from typing import Any
+from urllib.parse import quote_plus
 
 import requests
 
 from app.core.config import ALERTS_BRUNOROMA_BASE_URL, REQUEST_TIMEOUT, SSL_VERIFY
 
 LOGGER = logging.getLogger(__name__)
+ANVISA_SEARCH_URL = 'https://www.gov.br/anvisa/pt-br/search'
 
 
 def _normalize_registro(value: str) -> str:
@@ -23,8 +25,10 @@ def _clean(value: Any) -> str:
 
 
 def _normalize_alert_item(raw: dict[str, Any]) -> dict[str, Any]:
+    numero_alerta = _clean(raw.get('numero_alerta') or raw.get('numero') or raw.get('alerta'))
     return {
-        'numero_alerta': _clean(raw.get('numero_alerta') or raw.get('numero') or raw.get('alerta')),
+        'numero_alerta': numero_alerta,
+        'link_consulta': _build_alert_lookup_link(numero_alerta),
         'url': _clean(raw.get('url') or raw.get('link') or raw.get('fonte_url')),
         'titulo': _clean(raw.get('titulo') or raw.get('assunto') or raw.get('descricao')),
         'data': _clean(raw.get('data') or raw.get('data_publicacao')),
@@ -35,6 +39,14 @@ def _normalize_alert_item(raw: dict[str, Any]) -> dict[str, Any]:
         'nome_comercial': _clean(raw.get('nome_comercial') or raw.get('produto')),
         'nome_tecnico': _clean(raw.get('nome_tecnico')),
     }
+
+
+def _build_alert_lookup_link(numero_alerta: str) -> str:
+    cleaned = _clean(numero_alerta)
+    if not cleaned:
+        return ''
+    query = quote_plus(f'alerta {cleaned}')
+    return f'{ANVISA_SEARCH_URL}?SearchableText={query}'
 
 
 def _parse_alerts_payload(payload: Any) -> list[dict[str, Any]]:
@@ -72,7 +84,13 @@ def _parse_alert_numbers_from_text(payload: str) -> list[dict[str, Any]]:
             continue
         seen.add(key)
         unique_numbers.append(key)
-    return [{'numero_alerta': number} for number in unique_numbers]
+    return [
+        {
+            'numero_alerta': number,
+            'link_consulta': _build_alert_lookup_link(number),
+        }
+        for number in unique_numbers
+    ]
 
 
 def _fetch_remote_alerts(registro: str) -> list[dict[str, Any]]:

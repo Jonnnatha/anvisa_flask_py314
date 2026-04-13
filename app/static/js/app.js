@@ -36,6 +36,34 @@ function listField(label, values) {
   return `<div class="field"><span>${escapeHtml(label)}</span><strong>${escapeHtml(clean.join(' · '))}</strong></div>`;
 }
 
+function renderAlertLinks(alerts) {
+  const validAlerts = alerts.filter(item => String(item?.numero_alerta || '').trim());
+  if (!validAlerts.length) {
+    return '<p>Nenhum alerta encontrado para este registro.</p>';
+  }
+
+  const chips = validAlerts.map((item) => {
+    const number = String(item.numero_alerta).trim();
+    const link = String(item.link_consulta || '').trim();
+    if (!link) {
+      return `<span class="alert-chip">${escapeHtml(number)}</span>`;
+    }
+    return `
+      <a
+        class="alert-chip alert-chip-link"
+        href="${escapeHtml(link)}"
+        target="_blank"
+        rel="noopener noreferrer"
+        title="Consultar alerta ${escapeHtml(number)}"
+      >
+        ${escapeHtml(number)}
+      </a>
+    `;
+  }).join('');
+
+  return `<div class="alerts-chip-list">${chips}</div>`;
+}
+
 function render(data) {
   const productData = data.product_data || {};
   const labels = productData.labels || {};
@@ -51,11 +79,7 @@ function render(data) {
     return field(labels[key] || key, payload[key]);
   }).filter(Boolean).join('');
 
-  const alertsHtml = alerts.length
-    ? `<div class="field"><span>Números dos alertas</span><strong>${escapeHtml(
-      alerts.map(item => item.numero_alerta).filter(Boolean).join(' · ')
-    )}</strong></div>`
-    : '<p>Nenhum alerta encontrado para este registro.</p>';
+  const alertsHtml = renderAlertLinks(alerts);
 
   const materialsHtml = materials.length
     ? materials.map(item => `
