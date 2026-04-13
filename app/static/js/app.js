@@ -1,6 +1,7 @@
 const form = document.getElementById('consulta-form');
 const feedback = document.getElementById('feedback');
 const resultado = document.getElementById('resultado');
+const REQUEST_TIMEOUT_MS = 30000;
 
 const materialTypeLabels = {
   manual: 'Manual',
@@ -139,6 +140,7 @@ form.addEventListener('submit', async (event) => {
   event.preventDefault();
   hideFeedback();
   resultado.classList.add('hidden');
+  const submitButton = form.querySelector('button[type="submit"]');
   const registro = document.getElementById('registro').value.replace(/\D/g, '');
 
   if (registro.length !== 11) {
@@ -147,9 +149,14 @@ form.addEventListener('submit', async (event) => {
   }
 
   setFeedback('Consultando dados do produto, alertas e materiais técnicos...', 'ok');
+  if (submitButton) submitButton.disabled = true;
+  const controller = new AbortController();
+  const timeoutId = window.setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
 
   try {
-    const response = await fetch(`/api/consultar?registro=${encodeURIComponent(registro)}`);
+    const response = await fetch(`/api/consultar?registro=${encodeURIComponent(registro)}`, {
+      signal: controller.signal,
+    });
     const data = await response.json();
 
     if (!response.ok && data.error) {
@@ -165,6 +172,13 @@ form.addEventListener('submit', async (event) => {
     setFeedback(data.message || 'Consulta realizada com sucesso.', 'ok');
     render(data);
   } catch (err) {
-    setFeedback('Falha ao consultar o sistema. Tente novamente.', 'error');
+    if (err?.name === 'AbortError') {
+      setFeedback('A consulta excedeu o tempo limite. Tente novamente em instantes.', 'error');
+    } else {
+      setFeedback('Falha ao consultar o sistema. Tente novamente.', 'error');
+    }
+  } finally {
+    window.clearTimeout(timeoutId);
+    if (submitButton) submitButton.disabled = false;
   }
 });

@@ -7,7 +7,7 @@ from urllib.parse import quote_plus
 
 import requests
 
-from app.core.config import ALERTS_BRUNOROMA_BASE_URL, REQUEST_TIMEOUT, SSL_VERIFY
+from app.core.config import ALERTS_BRUNOROMA_BASE_URL, ALERTS_REQUEST_TIMEOUT, SSL_VERIFY
 
 LOGGER = logging.getLogger(__name__)
 GOOGLE_SEARCH_URL = 'https://www.google.com/search'
@@ -96,7 +96,7 @@ def _parse_alert_numbers_from_text(payload: str) -> list[dict[str, Any]]:
 def _fetch_remote_alerts(registro: str) -> list[dict[str, Any]]:
     endpoint = f"{ALERTS_BRUNOROMA_BASE_URL}/{registro}"
     try:
-        response = requests.get(endpoint, timeout=REQUEST_TIMEOUT, verify=SSL_VERIFY)
+        response = requests.get(endpoint, timeout=ALERTS_REQUEST_TIMEOUT, verify=SSL_VERIFY)
         response.raise_for_status()
     except requests.RequestException as exc:
         LOGGER.warning('Falha ao consultar alertas remotos para registro %s: %s', registro, exc)

@@ -11,7 +11,7 @@ from app.core.config import (
     ANVISA_AUTH_CLIENT_SECRET,
     ANVISA_AUTH_SCOPE,
     ANVISA_AUTH_TOKEN_URL,
-    REQUEST_TIMEOUT,
+    PRODUCT_REQUEST_TIMEOUT,
     SSL_VERIFY,
     USER_AGENT,
 )
@@ -70,7 +70,7 @@ def _request_new_token() -> tuple[str, int]:
             ANVISA_AUTH_TOKEN_URL,
             data=payload,
             headers=headers,
-            timeout=REQUEST_TIMEOUT,
+            timeout=PRODUCT_REQUEST_TIMEOUT,
             verify=SSL_VERIFY,
         )
     except requests.RequestException as exc:

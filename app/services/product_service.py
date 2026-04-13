@@ -5,7 +5,7 @@ from typing import Any
 
 import requests
 
-from app.core.config import ANVISA_PRODUCT_API_URL, REQUEST_TIMEOUT, SSL_VERIFY, USER_AGENT
+from app.core.config import ANVISA_PRODUCT_API_URL, PRODUCT_REQUEST_TIMEOUT, SSL_VERIFY, USER_AGENT
 from app.services.anvisa_auth import (
     AnvisaAuthError,
     MissingAnvisaCredentialsError,
@@ -70,7 +70,7 @@ def _request_products(payload: dict[str, Any], token: str) -> dict[str, Any]:
             ANVISA_PRODUCT_API_URL,
             headers=headers,
             json=payload,
-            timeout=REQUEST_TIMEOUT,
+            timeout=PRODUCT_REQUEST_TIMEOUT,
             verify=SSL_VERIFY,
         )
     except requests.RequestException as exc:
