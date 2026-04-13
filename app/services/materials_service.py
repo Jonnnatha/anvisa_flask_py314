@@ -26,16 +26,17 @@ MATERIAL_TYPES: dict[str, tuple[str, ...]] = {
     'manufacturer_document': ('fabricante', 'manufacturer communication', 'nota técnica do fabricante', 'comunicado do fabricante'),
 }
 
+# Ordem de prioridade solicitada: manual > ifu > service_manual > training > catalog > recall ...
 TYPE_PRIORITY = {
-    'service_manual': 150,
-    'ifu': 145,
-    'manual': 138,
-    'safety_notice': 138,
-    'field_corrective_action': 138,
-    'recall': 135,
-    'training': 120,
-    'technical_bulletin': 120,
-    'catalog': 112,
+    'manual': 160,
+    'ifu': 152,
+    'service_manual': 144,
+    'training': 136,
+    'catalog': 128,
+    'recall': 120,
+    'safety_notice': 116,
+    'field_corrective_action': 114,
+    'technical_bulletin': 108,
     'manufacturer_document': 100,
 }
 
@@ -78,6 +79,7 @@ BLOCKED_URL_PATTERNS = (
 class SearchStrategy:
     name: str
     query: str
+    layer: int
 
 
 def _clean(value: Any) -> str:
@@ -147,7 +149,7 @@ def _product_identity(product: dict[str, Any]) -> dict[str, str]:
     }
 
 
-def _add_query(strategies: list[SearchStrategy], seen: set[str], name: str, template: str) -> None:
+def _add_query(strategies: list[SearchStrategy], seen: set[str], name: str, template: str, layer: int) -> None:
     query = ' '.join(template.split()).strip()
     if not query:
         return
@@ -155,7 +157,7 @@ def _add_query(strategies: list[SearchStrategy], seen: set[str], name: str, temp
     if key in seen:
         return
     seen.add(key)
-    strategies.append(SearchStrategy(name=name, query=query))
+    strategies.append(SearchStrategy(name=name, query=query, layer=layer))
 
 
 def _build_queries(registro: str, product: dict[str, Any]) -> list[SearchStrategy]:
@@ -167,48 +169,67 @@ def _build_queries(registro: str, product: dict[str, Any]) -> list[SearchStrateg
     nome_tecnico = identity['nome_tecnico']
     processo = identity['processo']
 
-    bases = [part for part in (produto, fabricante, marca, modelo, nome_tecnico) if part]
-    compact_base = ' '.join(bases)
+    if not produto and marca and modelo:
+        produto = f'{marca} {modelo}'
 
     strategies: list[SearchStrategy] = []
     seen: set[str] = set()
 
+    # Camada 1: ancoragem forte no nome do produto.
     if produto:
-        _add_query(strategies, seen, 'product_manual', f'{produto} manual')
-        _add_query(strategies, seen, 'product_ifu', f'{produto} IFU')
-        _add_query(strategies, seen, 'product_ifu_pt', f'{produto} instruções de uso')
-        _add_query(strategies, seen, 'product_service_manual', f'{produto} service manual')
+        for suffix, name in (
+            ('manual', 'product_manual'),
+            ('IFU', 'product_ifu'),
+            ('instruções de uso', 'product_ifu_pt'),
+            ('service manual', 'product_service_manual'),
+            ('training', 'product_training'),
+            ('recall', 'product_recall'),
+            ('safety notice', 'product_safety_notice'),
+            ('field corrective action', 'product_fca'),
+            ('catálogo técnico', 'product_catalog'),
+            ('boletim técnico', 'product_technical_bulletin'),
+        ):
+            _add_query(strategies, seen, name, f'{produto} {suffix}', layer=1)
+
+    # Camada 2: combinações com fabricante/modelo/marca.
+    if fabricante and produto:
+        _add_query(strategies, seen, 'manufacturer_product_manual', f'{fabricante} {produto} manual', layer=2)
 
     if fabricante and modelo:
-        _add_query(strategies, seen, 'manufacturer_model_manual', f'{fabricante} {modelo} manual')
-        _add_query(strategies, seen, 'manufacturer_model_ifu', f'{fabricante} {modelo} IFU')
-        _add_query(strategies, seen, 'manufacturer_model_service_manual', f'{fabricante} {modelo} service manual')
-        _add_query(strategies, seen, 'manufacturer_model_training', f'{fabricante} {modelo} training')
-        _add_query(strategies, seen, 'manufacturer_model_catalog', f'{fabricante} {modelo} catálogo técnico')
-        _add_query(strategies, seen, 'manufacturer_model_bulletin', f'{fabricante} {modelo} technical bulletin')
-        _add_query(strategies, seen, 'manufacturer_model_recall', f'{fabricante} {modelo} recall')
-        _add_query(strategies, seen, 'manufacturer_model_notice', f'{fabricante} {modelo} field safety notice')
-        _add_query(strategies, seen, 'manufacturer_model_fca', f'{fabricante} {modelo} field corrective action')
+        for suffix, name in (
+            ('manual', 'manufacturer_model_manual'),
+            ('IFU', 'manufacturer_model_ifu'),
+            ('service manual', 'manufacturer_model_service_manual'),
+            ('training', 'manufacturer_model_training'),
+            ('catálogo técnico', 'manufacturer_model_catalog'),
+            ('technical bulletin', 'manufacturer_model_bulletin'),
+            ('recall', 'manufacturer_model_recall'),
+            ('field safety notice', 'manufacturer_model_notice'),
+            ('field corrective action', 'manufacturer_model_fca'),
+        ):
+            _add_query(strategies, seen, name, f'{fabricante} {modelo} {suffix}', layer=2)
 
     if marca and modelo:
-        _add_query(strategies, seen, 'brand_model_ifu', f'{marca} {modelo} IFU')
-        _add_query(strategies, seen, 'brand_model_service_manual', f'{marca} {modelo} service manual')
+        _add_query(strategies, seen, 'brand_model_ifu', f'{marca} {modelo} IFU', layer=2)
+        _add_query(strategies, seen, 'brand_model_service_manual', f'{marca} {modelo} service manual', layer=2)
 
+    # Camada 3: pivôs regulatórios/técnicos (registro, nome técnico, processo).
     if registro and produto:
-        _add_query(strategies, seen, 'registro_produto', f'{registro} {produto}')
-        _add_query(strategies, seen, 'registro_produto_manual', f'{registro} {produto} manual')
+        _add_query(strategies, seen, 'registro_produto', f'{registro} {produto}', layer=3)
+        _add_query(strategies, seen, 'registro_produto_manual', f'{registro} {produto} manual', layer=3)
 
     if nome_tecnico and fabricante:
-        _add_query(strategies, seen, 'technical_name_manufacturer', f'{nome_tecnico} {fabricante} manual')
+        _add_query(strategies, seen, 'technical_name_manufacturer', f'{nome_tecnico} {fabricante} manual', layer=3)
 
     if processo:
-        _add_query(strategies, seen, 'processo_product', f'{processo} {produto or fabricante} manual')
+        _add_query(strategies, seen, 'processo_product', f'{processo} {produto or fabricante} manual', layer=3)
 
-    if compact_base:
-        _add_query(strategies, seen, 'global_safety', f'{compact_base} safety notice')
-        _add_query(strategies, seen, 'global_document', f'{compact_base} fabricante comunicado')
+    if produto:
+        # Busca ancorada na ANVISA, simulando comportamento de pesquisa manual.
+        _add_query(strategies, seen, 'anvisa_product_manual', f'site:gov.br/anvisa "{produto}" manual', layer=3)
+        _add_query(strategies, seen, 'anvisa_product_ifu', f'site:gov.br/anvisa "{produto}" instruções de uso', layer=3)
 
-    return strategies[:24]
+    return strategies[:30]
 
 
 def _parse_search_page(search_url: str) -> list[dict[str, str]]:
@@ -327,7 +348,6 @@ def _score_relevance(
             token_hits += 1
     score += min(token_hits * 11, 77)
 
-    # identidade forte = nome + (fabricante/modelo/marca)
     product_hit = _contains_haystack(context, identity.get('nome_produto', '').casefold())
     manufacturer_hit = _contains_haystack(context, identity.get('fabricante', '').casefold())
     model_hit = _contains_haystack(context, identity.get('modelo', '').casefold())
@@ -335,7 +355,7 @@ def _score_relevance(
     technical_name_hit = _contains_haystack(context, identity.get('nome_tecnico', '').casefold())
 
     if product_hit:
-        score += 34
+        score += 36
     if manufacturer_hit:
         score += 24
     if model_hit:
@@ -351,13 +371,18 @@ def _score_relevance(
     if link.endswith('.pdf'):
         score += 18
 
-    if any(keyword in strategy.name for keyword in ('service_manual', 'ifu', 'recall', 'notice', 'fca')):
+    # Consultas da camada 1 têm maior peso e não devem falhar cedo.
+    if strategy.layer == 1:
+        score += 14
+    elif strategy.layer == 2:
         score += 8
 
     strong_relation = exact_registration or (
         (product_hit or technical_name_hit)
         and (manufacturer_hit or model_hit or brand_hit)
         and token_hits >= 2
+    ) or (
+        product_hit and token_hits >= 3
     ) or (
         manufacturer_hit and model_hit and token_hits >= 3
     )
@@ -366,7 +391,7 @@ def _score_relevance(
         return None
 
     confidence = 'baixo'
-    if score >= 190:
+    if score >= 195:
         confidence = 'alto'
     elif score >= 145:
         confidence = 'medio'
@@ -430,7 +455,7 @@ def find_related_materials(registro: str, product: dict[str, Any] | None = None)
         identity['modelo'],
         identity['fabricante'],
         identity['processo'],
-    )[:24]
+    )[:28]
     manufacturer_domains = _manufacturer_domain_candidates(product)
 
     ranked: list[dict[str, Any]] = []

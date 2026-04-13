@@ -100,6 +100,7 @@ function render(data) {
   const payload = productData.data || {};
   const alerts = Array.isArray(data.alerts) ? data.alerts : [];
   const materials = Array.isArray(data.materials_or_signals) ? data.materials_or_signals : [];
+  const materialsWarning = String(data.materials_warning || '').trim();
 
   const productFields = fieldsOrder.map((key) => {
     if (Array.isArray(payload[key])) {
@@ -112,7 +113,7 @@ function render(data) {
 
   const materialsHtml = materials.length
     ? materials.map(renderMaterial).join('')
-    : '<p>Nenhum material técnico público relevante foi encontrado para este produto.</p>';
+    : `<p>${escapeHtml(materialsWarning || 'Nenhum material técnico público relevante foi encontrado para este produto.')}</p>`;
 
   resultado.innerHTML = `
     <div class="box">

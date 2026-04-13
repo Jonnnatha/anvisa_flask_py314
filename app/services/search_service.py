@@ -89,6 +89,7 @@ def search_by_registration(value: str) -> dict[str, Any]:
             'alerts': alerts_result.get('alerts', []),
             'materials_or_signals': materials_result.get('items', []),
             'materials_source': materials_result.get('source'),
+            'materials_warning': materials_result.get('warning'),
         }
     )
     return result
