@@ -95,6 +95,47 @@ BLOCKED_URL_PATTERNS = (
     '/noticias',
 )
 
+GENERIC_URL_PATTERNS = (
+    '/assuntos',
+    '/noticias',
+    '/home',
+    '/portal',
+    '/govbr',
+    '/institucional',
+    '/categoria',
+    '/category',
+    '/menu',
+)
+
+GENERIC_TITLE_PATTERNS = (
+    'assuntos',
+    'página inicial',
+    'pagina inicial',
+    'início',
+    'inicio',
+    'institucional',
+    'notícias',
+    'noticias',
+    'portal',
+)
+
+USEFUL_URL_HINTS = (
+    '.pdf',
+    'manual',
+    'ifu',
+    'instruction',
+    'service',
+    'training',
+    'recall',
+    'safety',
+    'document',
+    'uploads',
+    'arquivo',
+    'download',
+    'complaint',
+    'forum',
+)
+
 USEFUL_TERMS = (
     'pdf',
     'manual',
@@ -574,6 +615,29 @@ def _has_useful_term(*texts: str) -> bool:
     return any(_contains_haystack(haystack, term) for term in USEFUL_TERMS)
 
 
+def _url_signal(link: str) -> dict[str, Any]:
+    normalized = _clean(link).casefold()
+    parsed = urlparse(normalized)
+    path = parsed.path or ''
+    query = parsed.query or ''
+    path_query = f'{path}?{query}'
+
+    useful_hits = sum(1 for hint in USEFUL_URL_HINTS if hint in path_query)
+    generic_hits = sum(1 for hint in GENERIC_URL_PATTERNS if hint in path_query)
+    path_segments = [segment for segment in path.split('/') if segment]
+    root_like = len(path_segments) <= 1
+    looks_document = any(ext in path for ext in ('.pdf', '.doc', '.docx', '.xls', '.xlsx', '.ppt', '.pptx'))
+    looks_navigation = root_like or generic_hits > 0
+
+    return {
+        'useful_hits': useful_hits,
+        'generic_hits': generic_hits,
+        'root_like': root_like,
+        'looks_document': looks_document,
+        'looks_navigation': looks_navigation,
+    }
+
+
 def _score_relevance(
     row: dict[str, str],
     registro: str,
@@ -586,6 +650,7 @@ def _score_relevance(
     title = _normalize(row.get('titulo', ''))
     snippet = _normalize(row.get('resumo', ''))
     link = row['link'].casefold()
+    url_signal = _url_signal(link)
     is_pdf = link.endswith('.pdf') or '.pdf?' in link or '/pdf/' in link
 
     material_type = _classify_type(context)
@@ -596,6 +661,14 @@ def _score_relevance(
         score -= 16
     if any(pattern in link for pattern in BLOCKED_URL_PATTERNS):
         score -= 18
+    if url_signal['generic_hits']:
+        score -= min(26, 8 * int(url_signal['generic_hits']))
+    if url_signal['root_like'] and not is_pdf:
+        score -= 12
+    if url_signal['useful_hits']:
+        score += min(20, 6 * int(url_signal['useful_hits']))
+    if url_signal['looks_document']:
+        score += 14
 
     digits_context = re.sub(r'\D', '', context)
     registro_digits = re.sub(r'\D', '', registro)
@@ -624,6 +697,12 @@ def _score_relevance(
     product_in_snippet = _contains_haystack(snippet, normalized_product_name)
     manufacturer_in_title_or_snippet = _contains_haystack(f'{title} {snippet}', normalized_manufacturer)
     model_in_title_or_snippet = _contains_haystack(f'{title} {snippet}', normalized_model)
+    useful_term_in_text = _has_useful_term(title, snippet)
+    useful_term_in_url = bool(url_signal['useful_hits']) or is_pdf
+    generic_title = any(pattern in title for pattern in GENERIC_TITLE_PATTERNS)
+    title_or_snippet_has_anchor = bool(
+        product_in_title or product_in_snippet or manufacturer_in_title_or_snippet or model_in_title_or_snippet
+    )
 
     if product_hit:
         score += 36
@@ -649,7 +728,7 @@ def _score_relevance(
         score += 16
     if model_in_title_or_snippet:
         score += 18
-    if _has_useful_term(title, snippet):
+    if useful_term_in_text:
         score += 30
 
     # Consultas da camada 1 têm maior peso e não devem falhar cedo.
@@ -660,7 +739,7 @@ def _score_relevance(
     if strategy.intent and strategy.intent in material_type:
         score += 12
 
-    condition_a = product_in_title and _has_useful_term(title, snippet)
+    condition_a = product_in_title and useful_term_in_text
     condition_b = manufacturer_in_title_or_snippet and (
         product_in_title or product_in_snippet or model_in_title_or_snippet
     )
@@ -672,20 +751,40 @@ def _score_relevance(
     )
     strong_relation = exact_registration or condition_a or condition_b or condition_c
 
+    generic_navigation_page = bool(
+        (url_signal['looks_navigation'] or generic_title)
+        and not is_pdf
+        and not useful_term_in_url
+        and not useful_term_in_text
+    )
+    if generic_navigation_page and not title_or_snippet_has_anchor:
+        row['discard_reason'] = 'generic_navigation_page'
+        return None
+
+    if generic_title and not title_or_snippet_has_anchor and not useful_term_in_url:
+        row['discard_reason'] = 'generic_title_without_anchor'
+        return None
+
+    technical_signal_present = bool(useful_term_in_text or useful_term_in_url or material_type != 'possible_material')
+    if not technical_signal_present:
+        row['discard_reason'] = 'missing_technical_signal'
+        return None
+
     if not strong_relation:
         minimal_relation = (
             product_hit
             or model_hit
             or technical_name_hit
             or token_hits >= 2
-            or (manufacturer_hit and _has_useful_term(title, snippet))
-            or (product_in_title and _has_useful_term(title, snippet))
+            or (manufacturer_hit and useful_term_in_text)
+            or (product_in_title and useful_term_in_text)
             or (manufacturer_in_title_or_snippet and product_in_snippet)
-            or (_has_useful_term(title, snippet) and (manufacturer_hit or model_hit))
+            or (useful_term_in_text and (manufacturer_hit or model_hit))
+            or (title_or_snippet_has_anchor and useful_term_in_url)
         )
         if not minimal_relation:
             row['discard_reason'] = 'weak_relation'
-            if _has_useful_term(title, snippet) and (token_hits >= 1 or manufacturer_hit or model_hit):
+            if (useful_term_in_text or useful_term_in_url) and (token_hits >= 1 or manufacturer_hit or model_hit):
                 score += 6
             else:
                 return None
@@ -695,10 +794,11 @@ def _score_relevance(
         product_in_title
         or product_in_snippet
         or (
-            _has_useful_term(title, snippet)
+            useful_term_in_text
             and (product_hit or manufacturer_hit or model_hit or token_hits >= 2)
         )
         or (domain_score >= 52 and (product_hit or model_hit or manufacturer_hit))
+        or (title_or_snippet_has_anchor and useful_term_in_url)
     )
 
     if not strong_relation and plausible_candidate:
@@ -778,15 +878,18 @@ def _fallback_from_rows(rows: list[dict[str, str]], identity: dict[str, str]) ->
         if link in seen_links:
             continue
         normalized_text = _normalize(f'{title} {snippet}')
+        url_signal = _url_signal(link)
         plausible = bool(
             _contains_haystack(normalized_text, product_name)
             or (
                 _contains_haystack(normalized_text, manufacturer)
                 and _contains_haystack(normalized_text, product_name)
             )
-            or _has_useful_term(title, snippet, link)
+            or (_has_useful_term(title, snippet, link) and url_signal['generic_hits'] == 0)
         )
         if not plausible:
+            continue
+        if url_signal['looks_navigation'] and not url_signal['looks_document']:
             continue
         seen_links.add(link)
         material_type = _classify_type(_normalize(f'{title} {snippet} {link}'))
@@ -1026,7 +1129,10 @@ def find_related_materials(registro: str, product: dict[str, Any] | None = None)
             break
 
         current_top = _dedupe_items(list(ranked))[:MATERIALS_EARLY_STOP_RESULTS]
-        if len(current_top) >= MATERIALS_EARLY_STOP_RESULTS:
+        high_quality_hits = [
+            item for item in current_top if item.get('tipo') != 'possible_material' and item.get('nivel_confianca') in {'medio', 'alto'}
+        ]
+        if len(high_quality_hits) >= MATERIALS_EARLY_STOP_RESULTS:
             LOGGER.info('materials.early_stop registro=%s resultados=%s', registro, len(current_top))
             break
 
