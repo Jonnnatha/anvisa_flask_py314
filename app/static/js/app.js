@@ -19,6 +19,7 @@ const materialTypeLabels = {
   manufacturer_document: 'Documento do fabricante',
   technical_document: 'Documento técnico',
   public_signal: 'Sinal público',
+  possible_material: 'Material plausível',
 };
 
 function materialBadge(item) {
@@ -131,6 +132,19 @@ function renderRecommendedSearches(searches) {
   `;
 }
 
+function renderGeneratedQueries(diagnostics) {
+  const generated = Array.isArray(diagnostics?.generated_queries) ? diagnostics.generated_queries : [];
+  if (!generated.length) return '';
+  const items = generated.map((query) => `<li><code>${escapeHtml(query)}</code></li>`).join('');
+  return `
+    <div class="recommended-searches">
+      <h4>Consultas geradas automaticamente</h4>
+      <p>Consultas adaptativas criadas com base no contexto do produto.</p>
+      <ul>${items}</ul>
+    </div>
+  `;
+}
+
 function render(data) {
   const productData = data.product_data || {};
   const labels = productData.labels || {};
@@ -143,6 +157,7 @@ function render(data) {
   const recommendedSearches = Array.isArray(data.materials_recommended_searches)
     ? data.materials_recommended_searches
     : [];
+  const diagnostics = data.materials_diagnostics || {};
 
   const productFields = fieldsOrder.map((key) => {
     if (Array.isArray(payload[key])) {
@@ -163,11 +178,12 @@ function render(data) {
 
   const statusMessage = fallbackByStatus[materialsStatus] || '';
   const primaryMessage = materialsWarning || statusMessage;
-  const showRecommended = !materials.length;
+  const showRecommended = !materials.length || materials.length < 3;
   const recommendedHtml = showRecommended ? renderRecommendedSearches(recommendedSearches) : '';
+  const generatedQueriesHtml = renderGeneratedQueries(diagnostics);
   const materialsHtml = materials.length
-    ? `${primaryMessage ? `<p>${escapeHtml(primaryMessage)}</p>` : ''}${materials.map(renderMaterial).join('')}${recommendedHtml}`
-    : `<p>${escapeHtml(primaryMessage || 'Não foi possível concluir a busca automática de materiais nesta consulta.')}</p>${recommendedHtml}`;
+    ? `${primaryMessage ? `<p>${escapeHtml(primaryMessage)}</p>` : ''}${materials.map(renderMaterial).join('')}${recommendedHtml}${generatedQueriesHtml}`
+    : `<p>${escapeHtml(primaryMessage || 'Não foi possível concluir a busca automática de materiais nesta consulta.')}</p>${recommendedHtml}${generatedQueriesHtml}`;
 
   resultado.innerHTML = `
     <div class="box">
