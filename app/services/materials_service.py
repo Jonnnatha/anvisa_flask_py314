@@ -136,6 +136,29 @@ USEFUL_URL_HINTS = (
     'forum',
 )
 
+QUERY_NOISE_TOKENS = {
+    'site',
+    'gov',
+    'anvisa',
+    'manual',
+    'ifu',
+    'pdf',
+    'service',
+    'training',
+    'recall',
+    'forum',
+    'reclamação',
+    'reclamacao',
+    'safety',
+    'notice',
+    'field',
+    'corrective',
+    'action',
+    'instruções',
+    'instrucoes',
+    'uso',
+}
+
 USEFUL_TERMS = (
     'pdf',
     'manual',
@@ -447,7 +470,19 @@ def _build_recommended_queries(identity: dict[str, str]) -> list[str]:
     return deduped[:8]
 
 
-def _parse_search_page(search_url: str) -> dict[str, Any]:
+def _query_anchor_tokens(query: str) -> list[str]:
+    tokens: list[str] = []
+    for token in re.split(r'[^a-zA-Z0-9]+', _to_ascii(query)):
+        clean = token.strip().casefold()
+        if len(clean) < 4:
+            continue
+        if clean in QUERY_NOISE_TOKENS:
+            continue
+        tokens.append(clean)
+    return list(dict.fromkeys(tokens))
+
+
+def _parse_search_page(search_url: str, query: str) -> dict[str, Any]:
     headers = {'User-Agent': USER_AGENT, 'Accept': 'text/html,*/*'}
     response = requests.get(search_url, timeout=MATERIALS_REQUEST_TIMEOUT, verify=SSL_VERIFY, headers=headers)
     response.raise_for_status()
@@ -455,6 +490,7 @@ def _parse_search_page(search_url: str) -> dict[str, Any]:
     soup = BeautifulSoup(response.text, 'html.parser')
     rows: list[dict[str, str]] = []
     anchors_found = 0
+    anchor_tokens = _query_anchor_tokens(query)
 
     for anchor in soup.select('a'):
         anchors_found += 1
@@ -472,12 +508,20 @@ def _parse_search_page(search_url: str) -> dict[str, Any]:
             continue
 
         parent_text = anchor.parent.get_text(' ', strip=True) if anchor.parent else ''
+        normalized_blob = _normalize(f'{title} {parent_text} {href}')
+        has_query_anchor = any(_contains_haystack(normalized_blob, token) for token in anchor_tokens) if anchor_tokens else False
+        has_technical_signal = _has_useful_term(title, parent_text, href)
+        if anchor_tokens and not has_query_anchor and not has_technical_signal:
+            continue
+        if any(pattern in href.casefold() for pattern in ('/pt-br/search', '/assuntos', '/menu')):
+            continue
+
         rows.append(
             {
                 'titulo': title,
                 'link': href,
                 'resumo': parent_text[:400],
-                'contexto': _normalize(f'{title} {parent_text} {href}'),
+                'contexto': normalized_blob,
                 'fonte': urlparse(href).netloc.lower(),
             }
         )
@@ -765,7 +809,12 @@ def _score_relevance(
         row['discard_reason'] = 'generic_title_without_anchor'
         return None
 
-    technical_signal_present = bool(useful_term_in_text or useful_term_in_url or material_type != 'possible_material')
+    technical_signal_present = bool(
+        useful_term_in_text
+        or useful_term_in_url
+        or material_type != 'possible_material'
+        or (title_or_snippet_has_anchor and not url_signal['looks_navigation'])
+    )
     if not technical_signal_present:
         row['discard_reason'] = 'missing_technical_signal'
         return None
@@ -1001,9 +1050,9 @@ def find_related_materials(registro: str, product: dict[str, Any] | None = None)
 
         rows: list[dict[str, str]] = []
         try:
-            gov_result = _parse_search_page(search_url)
+            gov_result = _parse_search_page(search_url, strategy.query)
             gov_rows = gov_result['rows']
-            rows.extend(gov_rows)
+            rows.extend(gov_rows[:8])
             strategy_log['sources'].append({'source': 'govbr', 'status': 'ok', 'rows': len(gov_rows), 'anchors': gov_result.get('anchors_found', 0)})
             if gov_result.get('anchors_found', 0) > 0 and not gov_rows:
                 parse_failures += 1
@@ -1024,7 +1073,7 @@ def find_related_materials(registro: str, product: dict[str, Any] | None = None)
         try:
             google_result = _parse_google_page(strategy.query)
             google_rows = google_result['rows']
-            rows.extend(google_rows)
+            rows.extend(google_rows[:10])
             strategy_log['sources'].append({'source': 'google', 'status': 'ok', 'rows': len(google_rows), 'blocks': google_result.get('blocks_found', 0)})
             if google_result.get('blocks_found', 0) > 0 and not google_rows:
                 parse_failures += 1
@@ -1045,7 +1094,7 @@ def find_related_materials(registro: str, product: dict[str, Any] | None = None)
         try:
             duck_result = _parse_duckduckgo_page(strategy.query)
             duck_rows = duck_result['rows']
-            rows.extend(duck_rows)
+            rows.extend(duck_rows[:10])
             strategy_log['sources'].append({'source': 'duckduckgo', 'status': 'ok', 'rows': len(duck_rows), 'blocks': duck_result.get('blocks_found', 0)})
             if duck_result.get('blocks_found', 0) > 0 and not duck_rows:
                 parse_failures += 1
