@@ -136,6 +136,7 @@ class SearchStrategy:
     name: str
     query: str
     layer: int
+    intent: str = 'general'
 
 
 def _clean(value: Any) -> str:
@@ -205,7 +206,14 @@ def _product_identity(product: dict[str, Any]) -> dict[str, str]:
     }
 
 
-def _add_query(strategies: list[SearchStrategy], seen: set[str], name: str, template: str, layer: int) -> None:
+def _add_query(
+    strategies: list[SearchStrategy],
+    seen: set[str],
+    name: str,
+    template: str,
+    layer: int,
+    intent: str = 'general',
+) -> None:
     query = ' '.join(template.split()).strip()
     if not query:
         return
@@ -213,7 +221,7 @@ def _add_query(strategies: list[SearchStrategy], seen: set[str], name: str, temp
     if key in seen:
         return
     seen.add(key)
-    strategies.append(SearchStrategy(name=name, query=query, layer=layer))
+    strategies.append(SearchStrategy(name=name, query=query, layer=layer, intent=intent))
 
 
 def _build_queries(registro: str, product: dict[str, Any]) -> list[SearchStrategy]:
@@ -283,6 +291,78 @@ def _build_queries(registro: str, product: dict[str, Any]) -> list[SearchStrateg
         _add_query(strategies, seen, 'anvisa_product_ifu', f'site:gov.br/anvisa "{produto}" instruções de uso', layer=3)
 
     return strategies[:30]
+
+
+def _build_adaptive_queries(
+    registro: str,
+    product: dict[str, Any],
+    max_strategies: int,
+) -> tuple[list[SearchStrategy], dict[str, Any]]:
+    base = _build_queries(registro, product)
+    identity = _product_identity(product)
+    strategies: list[SearchStrategy] = []
+    seen: set[str] = set()
+
+    anchors = [
+        identity.get('nome_produto', ''),
+        identity.get('fabricante', ''),
+        identity.get('modelo', ''),
+        identity.get('marca', ''),
+        identity.get('nome_tecnico', ''),
+    ]
+    anchor_strength = sum(1 for anchor in anchors if _clean(anchor))
+
+    for item in base:
+        _add_query(strategies, seen, item.name, item.query, item.layer, item.intent)
+
+    produto = identity.get('nome_produto', '')
+    fabricante = identity.get('fabricante', '')
+    modelo = identity.get('modelo', '')
+    marca = identity.get('marca', '')
+    processo = identity.get('processo', '')
+    nome_tecnico = identity.get('nome_tecnico', '')
+
+    if produto:
+        _add_query(strategies, seen, 'adaptive_anchor_manual_pdf', f'"{produto}" manual pdf', 1, 'manual')
+        _add_query(strategies, seen, 'adaptive_anchor_ifu_pdf', f'"{produto}" IFU pdf', 1, 'ifu')
+        _add_query(strategies, seen, 'adaptive_anchor_service', f'"{produto}" "service manual"', 2, 'service_manual')
+        _add_query(strategies, seen, 'adaptive_anchor_training', f'"{produto}" training technical', 2, 'training')
+        _add_query(strategies, seen, 'adaptive_anchor_recall', f'"{produto}" recall safety notice', 2, 'recall')
+
+    if fabricante and produto:
+        _add_query(strategies, seen, 'adaptive_manufacturer_document', f'"{fabricante}" "{produto}" documentation', 2, 'manufacturer_document')
+        _add_query(strategies, seen, 'adaptive_manufacturer_support', f'"{fabricante}" "{produto}" support manual', 2, 'manual')
+
+    if fabricante and modelo:
+        _add_query(strategies, seen, 'adaptive_manufacturer_model_manual', f'"{fabricante}" "{modelo}" manual pdf', 2, 'manual')
+        _add_query(strategies, seen, 'adaptive_manufacturer_model_service', f'"{fabricante}" "{modelo}" service manual', 2, 'service_manual')
+
+    if marca and modelo:
+        _add_query(strategies, seen, 'adaptive_brand_model_ifu', f'"{marca}" "{modelo}" IFU', 2, 'ifu')
+
+    if processo:
+        _add_query(strategies, seen, 'adaptive_processo', f'"{processo}" "{produto or fabricante}"', 3, 'technical_document')
+
+    if nome_tecnico and fabricante:
+        _add_query(strategies, seen, 'adaptive_nome_tecnico', f'"{nome_tecnico}" "{fabricante}" catalog', 3, 'catalog')
+
+    if anchor_strength <= 2 and produto:
+        _add_query(strategies, seen, 'adaptive_broad_manual', f'{produto} technical document', 3, 'technical_document')
+        _add_query(strategies, seen, 'adaptive_broad_forum', f'{produto} forum complaint', 3, 'forum')
+
+    query_metadata = {
+        'anchor_strength': anchor_strength,
+        'anchors': {
+            'nome_produto': bool(produto),
+            'fabricante': bool(fabricante),
+            'modelo': bool(modelo),
+            'marca': bool(marca),
+            'nome_tecnico': bool(nome_tecnico),
+            'numero_processo': bool(processo),
+        },
+    }
+
+    return strategies[:max_strategies], query_metadata
 
 
 def _build_recommended_queries(identity: dict[str, str]) -> list[str]:
@@ -577,6 +657,8 @@ def _score_relevance(
         score += 14
     elif strategy.layer == 2:
         score += 8
+    if strategy.intent and strategy.intent in material_type:
+        score += 12
 
     condition_a = product_in_title and _has_useful_term(title, snippet)
     condition_b = manufacturer_in_title_or_snippet and (
@@ -603,7 +685,10 @@ def _score_relevance(
         )
         if not minimal_relation:
             row['discard_reason'] = 'weak_relation'
-            return None
+            if _has_useful_term(title, snippet) and (token_hits >= 1 or manufacturer_hit or model_hit):
+                score += 6
+            else:
+                return None
         score += 10
 
     plausible_candidate = bool(
@@ -625,12 +710,12 @@ def _score_relevance(
     elif score >= 118:
         confidence = 'medio'
 
-    if score < 62 and not plausible_candidate:
+    if score < 50 and not plausible_candidate:
         row['discard_reason'] = 'low_confidence'
         return None
 
     item_type = material_type
-    if score < 102 or (not strong_relation and plausible_candidate):
+    if score < 92 or (not strong_relation and plausible_candidate):
         item_type = 'possible_material'
         if confidence == 'alto':
             confidence = 'medio'
@@ -646,6 +731,7 @@ def _score_relevance(
         'strategy': strategy.name,
         'score': score,
         'strong_relation': strong_relation,
+        'strategy_layer': strategy.layer,
     }
 
 
@@ -722,10 +808,24 @@ def _fallback_from_rows(rows: list[dict[str, str]], identity: dict[str, str]) ->
     return fallback_items
 
 
+def _strategy_rank_bonus(feedback: dict[str, dict[str, Any]], strategy: SearchStrategy) -> int:
+    bucket = feedback.get(strategy.intent, {})
+    accepted = int(bucket.get('accepted', 0))
+    queries = int(bucket.get('queries', 0))
+    if not queries:
+        return 0
+    hit_rate = accepted / queries
+    if hit_rate >= 1.5:
+        return 12
+    if hit_rate >= 1:
+        return 8
+    return 0
+
+
 def find_related_materials(registro: str, product: dict[str, Any] | None = None) -> dict[str, Any]:
     product = product or {}
     identity = _product_identity(product)
-    queries = _build_queries(registro, product)[:MATERIALS_MAX_STRATEGIES]
+    queries, query_metadata = _build_adaptive_queries(registro, product, MATERIALS_MAX_STRATEGIES)
 
     recommended_queries = _build_recommended_queries(identity)
     recommended_searches = [
@@ -767,12 +867,14 @@ def find_related_materials(registro: str, product: dict[str, Any] | None = None)
     strategy_logs: list[dict[str, Any]] = []
     discard_reasons: dict[str, int] = {}
     fallback_rows: list[dict[str, str]] = []
+    strategy_feedback: dict[str, dict[str, Any]] = {}
 
     for strategy in queries:
         strategy_log: dict[str, Any] = {
             'strategy': strategy.name,
             'query': strategy.query,
             'layer': strategy.layer,
+            'intent': strategy.intent,
             'sources': [],
             'raw_rows': 0,
             'filtered_out': 0,
@@ -880,6 +982,7 @@ def find_related_materials(registro: str, product: dict[str, Any] | None = None)
                 strategy=strategy,
             )
             if evaluated:
+                evaluated['score'] += _strategy_rank_bonus(strategy_feedback, strategy)
                 ranked.append(evaluated)
                 strategy_log['accepted'] += 1
                 LOGGER.info(
@@ -905,6 +1008,10 @@ def find_related_materials(registro: str, product: dict[str, Any] | None = None)
                 )
             total_rows_processed += 1
 
+        bucket = strategy_feedback.setdefault(strategy.intent, {'accepted': 0, 'queries': 0})
+        bucket['accepted'] = int(bucket.get('accepted', 0)) + int(strategy_log['accepted'])
+        bucket['queries'] = int(bucket.get('queries', 0)) + 1
+
         LOGGER.info(
             'materials.strategy.done registro=%s strategy=%s raw=%s accepted=%s filtered=%s',
             registro,
@@ -926,6 +1033,9 @@ def find_related_materials(registro: str, product: dict[str, Any] | None = None)
     deduped = _dedupe_items(ranked)
     if not deduped and fallback_rows:
         deduped = _dedupe_items(_fallback_from_rows(fallback_rows, identity))
+    elif len(deduped) < 3 and fallback_rows:
+        merged = _dedupe_items([*deduped, *_fallback_from_rows(fallback_rows, identity)])
+        deduped = merged[: max(3, len(deduped))]
     duration_ms = int((time.perf_counter() - started_at) * 1000)
     LOGGER.info(
         'materials.done registro=%s resultados=%s rows_processed=%s rows_collected=%s filtered=%s sources=%s timeout=%s errors=%s parse_failures=%s blocked_sources=%s duracao_ms=%s discard_reasons=%s',
@@ -974,6 +1084,9 @@ def find_related_materials(registro: str, product: dict[str, Any] | None = None)
         'blocked_sources': blocked_sources,
         'parse_failures': parse_failures,
         'strategies': strategy_logs,
+        'strategy_feedback': strategy_feedback,
+        'query_metadata': query_metadata,
+        'generated_queries': [item.query for item in queries[:10]],
     }
 
     if not deduped:
