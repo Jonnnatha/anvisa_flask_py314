@@ -19,7 +19,7 @@ from app.services.product_service import (
 )
 
 LOGGER = logging.getLogger(__name__)
-MATERIALS_TIMEOUT_WARNING = 'Não foi possível concluir a busca aprofundada de materiais técnicos nesta consulta.'
+MATERIALS_TIMEOUT_WARNING = 'A busca falhou por timeout nesta consulta.'
 
 
 def validate_registration(value: str) -> str:
@@ -96,7 +96,7 @@ def search_by_registration(value: str) -> dict[str, Any]:
     materials_product_context.update(enrichment_result.get('enriched_data', {}))
     materials_result: dict[str, Any] = {
         'items': [],
-        'status': 'search_timeout',
+        'status': 'timeout',
         'warning': MATERIALS_TIMEOUT_WARNING,
         'source': [],
         'recommended_searches': [],
@@ -112,21 +112,21 @@ def search_by_registration(value: str) -> dict[str, Any]:
         LOGGER.warning('search.materials.timeout registro=%s timeout_s=%s', registro, MATERIALS_TOTAL_TIMEOUT + 1)
         materials_result = {
             'items': [],
-            'status': 'search_timeout',
+            'status': 'timeout',
             'warning': MATERIALS_TIMEOUT_WARNING,
             'source': [],
             'recommended_searches': [],
-            'diagnostics': {'status': 'search_timeout', 'reason': 'future_timeout'},
+            'diagnostics': {'search_status': 'timeout', 'reason': 'future_timeout', 'errors': [{'step': 'materials_thread', 'type': 'timeout', 'message': 'Tempo limite excedido na execução da busca de materiais.'}]},
         }
     except Exception as exc:
         LOGGER.exception('search.materials.error registro=%s erro=%s', registro, exc)
         materials_result = {
             'items': [],
-            'status': 'search_blocked',
-            'warning': MATERIALS_TIMEOUT_WARNING,
+            'status': 'unexpected_error',
+            'warning': 'Não foi possível concluir a busca por erro inesperado.',
             'source': [],
             'recommended_searches': [],
-            'diagnostics': {'status': 'search_blocked', 'reason': str(exc)},
+            'diagnostics': {'search_status': 'unexpected_error', 'reason': str(exc), 'errors': [{'step': 'materials_thread', 'type': 'unexpected_error', 'message': str(exc)}]},
         }
 
     enrichment_result = enrich_product_data(

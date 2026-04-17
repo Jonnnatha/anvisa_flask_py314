@@ -145,6 +145,45 @@ function renderGeneratedQueries(diagnostics) {
   `;
 }
 
+function renderDiagnosticsSummary(diagnostics) {
+  if (!diagnostics || typeof diagnostics !== 'object') return '';
+  const rows = [
+    ['Status da busca', diagnostics.search_status],
+    ['Consultas usadas', Array.isArray(diagnostics.queries_used) ? diagnostics.queries_used.length : undefined],
+    ['Fontes consultadas', Array.isArray(diagnostics.sources_checked) ? diagnostics.sources_checked.join(' · ') : undefined],
+    ['Resultados brutos', diagnostics.raw_results_count],
+    ['Resultados aceitos', diagnostics.accepted_results_count],
+    ['Resultados descartados', diagnostics.discarded_results_count],
+  ]
+    .filter(([, value]) => value !== undefined && value !== null && String(value).trim() !== '')
+    .map(([label, value]) => `<li><strong>${escapeHtml(label)}:</strong> ${escapeHtml(value)}</li>`)
+    .join('');
+
+  if (!rows) return '';
+  return `
+    <div class="recommended-searches">
+      <h4>Diagnóstico da busca automática</h4>
+      <ul>${rows}</ul>
+    </div>
+  `;
+}
+
+function renderDiagnosticsErrors(diagnostics) {
+  const errors = Array.isArray(diagnostics?.errors) ? diagnostics.errors : [];
+  if (!errors.length) return '';
+  const items = errors.map((error) => {
+    const source = error.source ? ` · Fonte: ${error.source}` : '';
+    const strategy = error.strategy ? ` · Estratégia: ${error.strategy}` : '';
+    return `<li><strong>${escapeHtml(error.type || 'erro')}</strong>: ${escapeHtml(error.message || 'Falha não detalhada.')}${escapeHtml(source)}${escapeHtml(strategy)}</li>`;
+  }).join('');
+  return `
+    <div class="recommended-searches">
+      <h4>Erros identificados na pesquisa</h4>
+      <ul>${items}</ul>
+    </div>
+  `;
+}
+
 function render(data) {
   const productData = data.product_data || {};
   const labels = productData.labels || {};
@@ -170,10 +209,13 @@ function render(data) {
 
   const fallbackByStatus = {
     no_results: 'Nenhum material técnico público relevante foi encontrado para este produto.',
-    search_timeout: 'A busca automática de materiais expirou por tempo nesta consulta.',
+    timeout: 'A busca falhou por timeout nesta consulta.',
     search_blocked: 'A busca automática foi bloqueada por uma fonte externa nesta consulta.',
-    materials_found: '',
-    possible_materials_found: 'A busca encontrou materiais plausíveis com menor confiança; valide os documentos antes do uso.',
+    parse_failure: 'O parser não conseguiu interpretar os resultados retornados.',
+    filtered_out: 'A busca encontrou resultados, mas todos foram descartados pelo filtro.',
+    unexpected_error: 'Não foi possível concluir a busca por erro inesperado.',
+    partial_results: 'A busca encontrou materiais, mas algumas etapas falharam.',
+    results_found: '',
   };
 
   const statusMessage = fallbackByStatus[materialsStatus] || '';
@@ -181,9 +223,11 @@ function render(data) {
   const showRecommended = !materials.length || materials.length < 3;
   const recommendedHtml = showRecommended ? renderRecommendedSearches(recommendedSearches) : '';
   const generatedQueriesHtml = renderGeneratedQueries(diagnostics);
+  const diagnosticsSummaryHtml = renderDiagnosticsSummary(diagnostics);
+  const diagnosticsErrorsHtml = renderDiagnosticsErrors(diagnostics);
   const materialsHtml = materials.length
-    ? `${primaryMessage ? `<p>${escapeHtml(primaryMessage)}</p>` : ''}${materials.map(renderMaterial).join('')}${recommendedHtml}${generatedQueriesHtml}`
-    : `<p>${escapeHtml(primaryMessage || 'Não foi possível concluir a busca automática de materiais nesta consulta.')}</p>${recommendedHtml}${generatedQueriesHtml}`;
+    ? `${primaryMessage ? `<p>${escapeHtml(primaryMessage)}</p>` : ''}${materials.map(renderMaterial).join('')}${diagnosticsErrorsHtml}${recommendedHtml}${generatedQueriesHtml}${diagnosticsSummaryHtml}`
+    : `<p>${escapeHtml(primaryMessage || 'Não foi possível concluir a busca automática de materiais nesta consulta.')}</p>${diagnosticsErrorsHtml}${recommendedHtml}${generatedQueriesHtml}${diagnosticsSummaryHtml}`;
 
   resultado.innerHTML = `
     <div class="box">
