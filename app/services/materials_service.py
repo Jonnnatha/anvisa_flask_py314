@@ -196,13 +196,11 @@ MATERIALS_AUTOSEARCH_WARNING = 'Não foi possível concluir a busca automática 
 
 
 MATERIALS_STATUS_MESSAGES = {
-    'results_found': '',
-    'partial_results': 'A busca encontrou materiais, mas algumas etapas falharam. Revise os diagnósticos abaixo.',
-    'search_blocked': 'A fonte de pesquisa bloqueou a consulta automática.',
+    'success': '',
+    'partial_success': 'A busca encontrou materiais, mas foi encerrada antes de concluir todas as etapas.',
+    'blocked': 'A fonte de pesquisa bloqueou a consulta automática.',
     'timeout': 'A busca falhou por timeout nesta consulta.',
-    'parse_failure': 'O parser não conseguiu interpretar os resultados retornados.',
-    'filtered_out': 'A busca encontrou resultados, mas todos foram descartados pelo filtro.',
-    'unexpected_error': 'Não foi possível concluir a busca por erro inesperado.',
+    'error': 'Não foi possível concluir a busca por erro inesperado.',
     'no_results': 'Nenhum material técnico público relevante foi encontrado para este produto.',
 }
 
@@ -315,58 +313,21 @@ def _build_queries(registro: str, product: dict[str, Any]) -> list[SearchStrateg
     strategies: list[SearchStrategy] = []
     seen: set[str] = set()
 
-    # Camada 1: ancoragem forte no nome do produto.
+    # Busca objetiva e curta: poucas queries de alto valor.
     if produto:
-        for suffix, name in MANDATORY_QUERY_SUFFIXES:
-            _add_query(strategies, seen, name, f'{produto} {suffix}', layer=1)
-        for suffix, name in (
-            ('safety notice', 'product_safety_notice'),
-            ('field corrective action', 'product_fca'),
-            ('catálogo técnico', 'product_catalog'),
-            ('boletim técnico', 'product_technical_bulletin'),
-        ):
-            _add_query(strategies, seen, name, f'{produto} {suffix}', layer=1)
+        _add_query(strategies, seen, 'product_manual', f'{produto} manual', layer=1, intent='manual')
+        _add_query(strategies, seen, 'product_ifu', f'{produto} IFU', layer=1, intent='ifu')
 
-    # Camada 2: combinações com fabricante/modelo/marca.
     if fabricante and produto:
-        _add_query(strategies, seen, 'manufacturer_product_manual', f'{fabricante} {produto} manual', layer=2)
-        _add_query(strategies, seen, 'manufacturer_product_ifu', f'{fabricante} {produto} IFU', layer=2)
+        _add_query(strategies, seen, 'manufacturer_product_manual', f'{fabricante} {produto} manual', layer=2, intent='manual')
 
     if fabricante and modelo:
-        for suffix, name in (
-            ('manual', 'manufacturer_model_manual'),
-            ('IFU', 'manufacturer_model_ifu'),
-            ('service manual', 'manufacturer_model_service_manual'),
-            ('training', 'manufacturer_model_training'),
-            ('catálogo técnico', 'manufacturer_model_catalog'),
-            ('technical bulletin', 'manufacturer_model_bulletin'),
-            ('recall', 'manufacturer_model_recall'),
-            ('field safety notice', 'manufacturer_model_notice'),
-            ('field corrective action', 'manufacturer_model_fca'),
-        ):
-            _add_query(strategies, seen, name, f'{fabricante} {modelo} {suffix}', layer=2)
-
-    if marca and modelo:
-        _add_query(strategies, seen, 'brand_model_ifu', f'{marca} {modelo} IFU', layer=2)
-        _add_query(strategies, seen, 'brand_model_service_manual', f'{marca} {modelo} service manual', layer=2)
-
-    # Camada 3: pivôs regulatórios/técnicos (registro, nome técnico, processo).
-    if registro and produto:
-        _add_query(strategies, seen, 'registro_produto', f'{registro} {produto}', layer=3)
-        _add_query(strategies, seen, 'registro_produto_manual', f'{registro} {produto} manual', layer=3)
-
-    if nome_tecnico and fabricante:
-        _add_query(strategies, seen, 'technical_name_manufacturer', f'{nome_tecnico} {fabricante} manual', layer=3)
-
-    if processo:
-        _add_query(strategies, seen, 'processo_product', f'{processo} {produto or fabricante} manual', layer=3)
+        _add_query(strategies, seen, 'manufacturer_model_manual', f'{fabricante} {modelo} manual', layer=2, intent='manual')
 
     if produto:
-        # Busca ancorada na ANVISA, simulando comportamento de pesquisa manual.
-        _add_query(strategies, seen, 'anvisa_product_manual', f'site:gov.br/anvisa "{produto}" manual', layer=3)
-        _add_query(strategies, seen, 'anvisa_product_ifu', f'site:gov.br/anvisa "{produto}" instruções de uso', layer=3)
+        _add_query(strategies, seen, 'product_recall', f'{produto} recall', layer=3, intent='recall')
 
-    return strategies[:30]
+    return strategies[:MATERIALS_MAX_STRATEGIES]
 
 
 def _build_adaptive_queries(
@@ -374,71 +335,17 @@ def _build_adaptive_queries(
     product: dict[str, Any],
     max_strategies: int,
 ) -> tuple[list[SearchStrategy], dict[str, Any]]:
-    base = _build_queries(registro, product)
     identity = _product_identity(product)
-    strategies: list[SearchStrategy] = []
-    seen: set[str] = set()
-
-    anchors = [
-        identity.get('nome_produto', ''),
-        identity.get('fabricante', ''),
-        identity.get('modelo', ''),
-        identity.get('marca', ''),
-        identity.get('nome_tecnico', ''),
-    ]
-    anchor_strength = sum(1 for anchor in anchors if _clean(anchor))
-
-    for item in base:
-        _add_query(strategies, seen, item.name, item.query, item.layer, item.intent)
-
-    produto = identity.get('nome_produto', '')
-    fabricante = identity.get('fabricante', '')
-    modelo = identity.get('modelo', '')
-    marca = identity.get('marca', '')
-    processo = identity.get('processo', '')
-    nome_tecnico = identity.get('nome_tecnico', '')
-
-    if produto:
-        _add_query(strategies, seen, 'adaptive_anchor_manual_pdf', f'"{produto}" manual pdf', 1, 'manual')
-        _add_query(strategies, seen, 'adaptive_anchor_ifu_pdf', f'"{produto}" IFU pdf', 1, 'ifu')
-        _add_query(strategies, seen, 'adaptive_anchor_service', f'"{produto}" "service manual"', 2, 'service_manual')
-        _add_query(strategies, seen, 'adaptive_anchor_training', f'"{produto}" training technical', 2, 'training')
-        _add_query(strategies, seen, 'adaptive_anchor_recall', f'"{produto}" recall safety notice', 2, 'recall')
-
-    if fabricante and produto:
-        _add_query(strategies, seen, 'adaptive_manufacturer_document', f'"{fabricante}" "{produto}" documentation', 2, 'manufacturer_document')
-        _add_query(strategies, seen, 'adaptive_manufacturer_support', f'"{fabricante}" "{produto}" support manual', 2, 'manual')
-
-    if fabricante and modelo:
-        _add_query(strategies, seen, 'adaptive_manufacturer_model_manual', f'"{fabricante}" "{modelo}" manual pdf', 2, 'manual')
-        _add_query(strategies, seen, 'adaptive_manufacturer_model_service', f'"{fabricante}" "{modelo}" service manual', 2, 'service_manual')
-
-    if marca and modelo:
-        _add_query(strategies, seen, 'adaptive_brand_model_ifu', f'"{marca}" "{modelo}" IFU', 2, 'ifu')
-
-    if processo:
-        _add_query(strategies, seen, 'adaptive_processo', f'"{processo}" "{produto or fabricante}"', 3, 'technical_document')
-
-    if nome_tecnico and fabricante:
-        _add_query(strategies, seen, 'adaptive_nome_tecnico', f'"{nome_tecnico}" "{fabricante}" catalog', 3, 'catalog')
-
-    if anchor_strength <= 2 and produto:
-        _add_query(strategies, seen, 'adaptive_broad_manual', f'{produto} technical document', 3, 'technical_document')
-        _add_query(strategies, seen, 'adaptive_broad_forum', f'{produto} forum complaint', 3, 'forum')
-
+    base = _build_queries(registro, product)[:max_strategies]
     query_metadata = {
-        'anchor_strength': anchor_strength,
         'anchors': {
-            'nome_produto': bool(produto),
-            'fabricante': bool(fabricante),
-            'modelo': bool(modelo),
-            'marca': bool(marca),
-            'nome_tecnico': bool(nome_tecnico),
-            'numero_processo': bool(processo),
+            'nome_produto': bool(identity.get('nome_produto')),
+            'fabricante': bool(identity.get('fabricante')),
+            'modelo': bool(identity.get('modelo')),
         },
+        'strategy_mode': 'lean',
     }
-
-    return strategies[:max_strategies], query_metadata
+    return base, query_metadata
 
 
 def _build_recommended_queries(identity: dict[str, str]) -> list[str]:
@@ -494,9 +401,9 @@ def _query_anchor_tokens(query: str) -> list[str]:
     return list(dict.fromkeys(tokens))
 
 
-def _parse_search_page(search_url: str, query: str) -> dict[str, Any]:
+def _parse_search_page(search_url: str, query: str, timeout_s: float, max_results: int) -> dict[str, Any]:
     headers = {'User-Agent': USER_AGENT, 'Accept': 'text/html,*/*'}
-    response = requests.get(search_url, timeout=MATERIALS_REQUEST_TIMEOUT, verify=SSL_VERIFY, headers=headers)
+    response = requests.get(search_url, timeout=timeout_s, verify=SSL_VERIFY, headers=headers)
     response.raise_for_status()
 
     soup = BeautifulSoup(response.text, 'html.parser')
@@ -537,16 +444,18 @@ def _parse_search_page(search_url: str, query: str) -> dict[str, Any]:
                 'fonte': urlparse(href).netloc.lower(),
             }
         )
+        if len(rows) >= max_results:
+            break
 
     return {'rows': rows, 'anchors_found': anchors_found}
 
 
-def _parse_duckduckgo_page(query: str) -> dict[str, Any]:
+def _parse_duckduckgo_page(query: str, timeout_s: float, max_results: int) -> dict[str, Any]:
     headers = {'User-Agent': USER_AGENT, 'Accept': 'text/html,*/*'}
     response = requests.get(
         DUCKDUCKGO_HTML_URL,
         params={'q': query},
-        timeout=MATERIALS_REQUEST_TIMEOUT,
+        timeout=timeout_s,
         verify=SSL_VERIFY,
         headers=headers,
     )
@@ -583,15 +492,17 @@ def _parse_duckduckgo_page(query: str) -> dict[str, Any]:
                 'fonte': urlparse(href).netloc.lower(),
             }
         )
+        if len(rows) >= max_results:
+            break
     return {'rows': rows, 'blocks_found': blocks_found}
 
 
-def _parse_google_page(query: str) -> dict[str, Any]:
+def _parse_google_page(query: str, timeout_s: float, max_results: int) -> dict[str, Any]:
     headers = {'User-Agent': USER_AGENT, 'Accept': 'text/html,*/*', 'Accept-Language': 'pt-BR,pt;q=0.9,en;q=0.8'}
     response = requests.get(
         GOOGLE_SEARCH_URL,
-        params={'q': query, 'num': 10, 'hl': 'pt-BR'},
-        timeout=MATERIALS_REQUEST_TIMEOUT,
+        params={'q': query, 'num': max(5, max_results), 'hl': 'pt-BR'},
+        timeout=timeout_s,
         verify=SSL_VERIFY,
         headers=headers,
     )
@@ -633,6 +544,8 @@ def _parse_google_page(query: str) -> dict[str, Any]:
                 'fonte': urlparse(href).netloc.lower(),
             }
         )
+        if len(rows) >= max_results:
+            break
 
     return {'rows': rows, 'blocks_found': blocks_found}
 
@@ -1002,7 +915,7 @@ def find_related_materials(registro: str, product: dict[str, Any] | None = None)
     except Exception as exc:
         LOGGER.exception('materials.query_build.error registro=%s erro=%s', registro, exc)
         diagnostics = {
-            'search_status': 'unexpected_error',
+            'search_status': 'error',
             'errors': [{'step': 'build_query', 'type': 'erro_ao_montar_query', 'message': str(exc)}],
             'queries_used': [],
             'sources_checked': [],
@@ -1016,8 +929,8 @@ def find_related_materials(registro: str, product: dict[str, Any] | None = None)
         }
         return {
             'items': [],
-            'status': 'unexpected_error',
-            'warning': MATERIALS_STATUS_MESSAGES['unexpected_error'],
+            'status': 'error',
+            'warning': MATERIALS_STATUS_MESSAGES['error'],
             'source': [],
             'recommended_searches': recommended_searches,
             'diagnostics': diagnostics,
@@ -1085,10 +998,14 @@ def find_related_materials(registro: str, product: dict[str, Any] | None = None)
             }
         )
 
+    max_rows_per_query = max(5, min(10, MATERIALS_MAX_ROWS_PER_STRATEGY))
+    max_rows_total = max(10, min(15, MATERIALS_MAX_TOTAL_ROWS))
+    max_items_final = 5
+    per_call_timeout = max(1.5, min(float(MATERIALS_REQUEST_TIMEOUT), 4.0))
+
     source_runners = (
-        ('govbr', lambda q: _parse_search_page(f"{GOVBR_SEARCH_URL}?SearchableText={quote_plus(q)}", q), 8),
-        ('google_search', _parse_google_page, 10),
-        ('duckduckgo_search', _parse_duckduckgo_page, 10),
+        ('duckduckgo_search', _parse_duckduckgo_page),
+        ('google_search', _parse_google_page),
     )
 
     for strategy in queries:
@@ -1118,38 +1035,36 @@ def find_related_materials(registro: str, product: dict[str, Any] | None = None)
 
         rows: list[dict[str, str]] = []
 
-        for source_name, runner, row_cap in source_runners:
+        for source_name, runner in source_runners:
             source_started = time.perf_counter()
             checked_sources.add(source_name)
+            remaining = deadline - time.perf_counter()
+            if remaining <= 0:
+                timeout_events += 1
+                register_error('query_source', 'timeout', f'Tempo total esgotado antes de consultar {source_name}.', strategy.name, source_name)
+                strategy_log['sources'].append({'source': source_name, 'status': 'timeout', 'rows': 0, 'duration_ms': 0})
+                break
+            timeout_s = max(0.8, min(per_call_timeout, remaining))
             try:
-                result = runner(strategy.query)
+                result = runner(strategy.query, timeout_s=timeout_s, max_results=max_rows_per_query)
                 source_rows = result.get('rows', [])
-                rows.extend(source_rows[:row_cap])
+                rows.extend(source_rows[:max_rows_per_query])
                 source_log = {
                     'source': source_name,
                     'status': 'ok',
                     'rows': len(source_rows),
                     'duration_ms': int((time.perf_counter() - source_started) * 1000),
                 }
-                if source_name == 'govbr':
-                    source_log['anchors'] = result.get('anchors_found', 0)
-                    visited_urls.append(f"{GOVBR_SEARCH_URL}?SearchableText={quote_plus(strategy.query)}")
-                    if source_log['anchors'] > 0 and not source_rows:
-                        parse_failures += 1
-                        source_log['status'] = 'parse_failure'
-                        source_log['detail'] = 'anchors_without_valid_rows'
-                        register_error('parse_source', 'parser_not_found_results', 'Parser encontrou âncoras, mas sem linhas válidas.', strategy.name, source_name)
-                else:
-                    source_log['blocks'] = result.get('blocks_found', 0)
-                    if source_name == 'google_search':
-                        visited_urls.append(f'{GOOGLE_SEARCH_URL}?q={quote_plus(strategy.query)}')
-                    elif source_name == 'duckduckgo_search':
-                        visited_urls.append(f'{DUCKDUCKGO_HTML_URL}?q={quote_plus(strategy.query)}')
-                    if source_log['blocks'] > 0 and not source_rows:
-                        parse_failures += 1
-                        source_log['status'] = 'parse_failure'
-                        source_log['detail'] = 'blocks_without_valid_rows'
-                        register_error('parse_source', 'parser_not_found_results', 'Parser encontrou blocos, mas sem linhas válidas.', strategy.name, source_name)
+                source_log['blocks'] = result.get('blocks_found', 0)
+                if source_name == 'google_search':
+                    visited_urls.append(f'{GOOGLE_SEARCH_URL}?q={quote_plus(strategy.query)}')
+                elif source_name == 'duckduckgo_search':
+                    visited_urls.append(f'{DUCKDUCKGO_HTML_URL}?q={quote_plus(strategy.query)}')
+                if source_log['blocks'] > 0 and not source_rows:
+                    parse_failures += 1
+                    source_log['status'] = 'parse_failure'
+                    source_log['detail'] = 'blocks_without_valid_rows'
+                    register_error('parse_source', 'parser_not_found_results', 'Parser encontrou blocos, mas sem linhas válidas.', strategy.name, source_name)
                 strategy_log['sources'].append(source_log)
                 LOGGER.info(
                     'materials.source.done registro=%s strategy=%s fonte=%s rows=%s duracao_ms=%s',
@@ -1193,19 +1108,22 @@ def find_related_materials(registro: str, product: dict[str, Any] | None = None)
                 )
                 LOGGER.exception('materials.unexpected registro=%s fonte=%s strategy=%s erro=%s', registro, source_name, strategy.name, exc)
 
+            if len(rows) >= max_rows_per_query:
+                break
+
         strategy_log['raw_rows'] = len(rows)
         total_rows_collected += len(rows)
         fallback_rows.extend(rows)
         LOGGER.info('materials.strategy.collected registro=%s strategy=%s rows=%s', registro, strategy.name, len(rows))
 
-        for row in rows[:MATERIALS_MAX_ROWS_PER_STRATEGY]:
+        for row in rows[:max_rows_per_query]:
             if time.perf_counter() >= deadline:
                 timeout_events += 1
                 register_error('score_rows', 'timeout', 'Tempo total da busca excedido durante avaliação de resultados.', strategy.name)
                 LOGGER.warning('materials.timeout registro=%s etapa=row_loop strategy=%s', registro, strategy.name)
                 break
-            if total_rows_processed >= MATERIALS_MAX_TOTAL_ROWS:
-                LOGGER.info('materials.limit_rows registro=%s limite=%s', registro, MATERIALS_MAX_TOTAL_ROWS)
+            if total_rows_processed >= max_rows_total:
+                LOGGER.info('materials.limit_rows registro=%s limite=%s', registro, max_rows_total)
                 break
             evaluated = _score_relevance(
                 row,
@@ -1231,13 +1149,13 @@ def find_related_materials(registro: str, product: dict[str, Any] | None = None)
         bucket['queries'] = int(bucket.get('queries', 0)) + 1
         strategy_logs.append(strategy_log)
 
-        if total_rows_processed >= MATERIALS_MAX_TOTAL_ROWS:
+        if total_rows_processed >= max_rows_total:
             break
         current_top = _dedupe_items(list(ranked))[:MATERIALS_EARLY_STOP_RESULTS]
         high_quality_hits = [
             item for item in current_top if item.get('tipo') != 'possible_material' and item.get('nivel_confianca') in {'medio', 'alto'}
         ]
-        if len(high_quality_hits) >= MATERIALS_EARLY_STOP_RESULTS:
+        if len(high_quality_hits) >= min(2, MATERIALS_EARLY_STOP_RESULTS):
             LOGGER.info('materials.early_stop registro=%s resultados=%s', registro, len(current_top))
             break
 
@@ -1259,21 +1177,19 @@ def find_related_materials(registro: str, product: dict[str, Any] | None = None)
     if total_rows_collected > 0 and total_filtered_out >= total_rows_processed and not deduped:
         register_error('filtering', 'results_filtered_out', 'Resultados foram encontrados, mas descartados pelo filtro/score.', 'global')
 
-    status = 'results_found'
+    timed_out = timeout_events > 0 or time.perf_counter() >= deadline
+
+    status = 'success'
     if unexpected_failure and not deduped:
-        status = 'unexpected_error'
+        status = 'error'
     elif timeout_events and not deduped:
         status = 'timeout'
     elif blocked_sources and not deduped:
-        status = 'search_blocked'
-    elif parse_failures and not deduped:
-        status = 'parse_failure'
-    elif total_rows_collected > 0 and not deduped:
-        status = 'filtered_out'
+        status = 'blocked'
     elif not total_rows_collected and not deduped:
         status = 'no_results'
-    elif deduped and (timeout_events or blocked_sources or parse_failures or unexpected_failure):
-        status = 'partial_results'
+    elif deduped and (timed_out or blocked_sources or parse_failures or unexpected_failure):
+        status = 'partial_success'
 
     duration_ms = int((time.perf_counter() - started_at) * 1000)
     diagnostics = {
@@ -1308,7 +1224,7 @@ def find_related_materials(registro: str, product: dict[str, Any] | None = None)
     )
 
     return {
-        'items': deduped[:8],
+        'items': deduped[:max_items_final],
         'status': status,
         'warning': MATERIALS_STATUS_MESSAGES.get(status) or MATERIALS_AUTOSEARCH_WARNING,
         'source': visited_urls,

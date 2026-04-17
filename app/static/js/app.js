@@ -210,12 +210,10 @@ function render(data) {
   const fallbackByStatus = {
     no_results: 'Nenhum material técnico público relevante foi encontrado para este produto.',
     timeout: 'A busca falhou por timeout nesta consulta.',
-    search_blocked: 'A busca automática foi bloqueada por uma fonte externa nesta consulta.',
-    parse_failure: 'O parser não conseguiu interpretar os resultados retornados.',
-    filtered_out: 'A busca encontrou resultados, mas todos foram descartados pelo filtro.',
-    unexpected_error: 'Não foi possível concluir a busca por erro inesperado.',
-    partial_results: 'A busca encontrou materiais, mas algumas etapas falharam.',
-    results_found: '',
+    blocked: 'A busca automática foi bloqueada por uma fonte externa nesta consulta.',
+    error: 'Não foi possível concluir a busca por erro inesperado.',
+    partial_success: 'A busca foi encerrada antes de concluir totalmente, mas alguns materiais úteis foram encontrados.',
+    success: '',
   };
 
   const statusMessage = fallbackByStatus[materialsStatus] || '';
