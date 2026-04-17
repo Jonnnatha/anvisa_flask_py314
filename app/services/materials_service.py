@@ -463,8 +463,9 @@ def _parse_duckduckgo_page(query: str, timeout_s: float, max_results: int) -> di
         headers=headers,
     )
     response.raise_for_status()
+    body = response.text or ''
 
-    soup = BeautifulSoup(response.text, 'html.parser')
+    soup = BeautifulSoup(body, 'html.parser')
     rows: list[dict[str, str]] = []
     blocks_found = 0
 
@@ -497,7 +498,18 @@ def _parse_duckduckgo_page(query: str, timeout_s: float, max_results: int) -> di
         )
         if len(rows) >= max_results:
             break
-    return {'rows': rows, 'blocks_found': blocks_found}
+    html_lower = body.casefold()
+    blocked_hint = any(marker in html_lower for marker in ('captcha', 'unusual traffic', 'detected unusual'))
+    empty_hint = any(marker in html_lower for marker in ('no results.', 'no  results.', 'não encontramos resultados'))
+    return {
+        'rows': rows,
+        'blocks_found': blocks_found,
+        'http_status': response.status_code,
+        'response_bytes': len(body.encode('utf-8', errors='ignore')),
+        'blocked_hint': blocked_hint,
+        'empty_hint': empty_hint,
+        'response_received': True,
+    }
 
 
 def _parse_google_page(query: str, timeout_s: float, max_results: int) -> dict[str, Any]:
@@ -510,8 +522,9 @@ def _parse_google_page(query: str, timeout_s: float, max_results: int) -> dict[s
         headers=headers,
     )
     response.raise_for_status()
+    body = response.text or ''
 
-    soup = BeautifulSoup(response.text, 'html.parser')
+    soup = BeautifulSoup(body, 'html.parser')
     rows: list[dict[str, str]] = []
     blocks_found = 0
 
@@ -550,7 +563,27 @@ def _parse_google_page(query: str, timeout_s: float, max_results: int) -> dict[s
         if len(rows) >= max_results:
             break
 
-    return {'rows': rows, 'blocks_found': blocks_found}
+    html_lower = body.casefold()
+    blocked_hint = any(
+        marker in html_lower
+        for marker in (
+            'our systems have detected unusual traffic',
+            'detected unusual traffic',
+            'sorry',
+            '/sorry/index',
+            'captcha',
+        )
+    )
+    empty_hint = any(marker in html_lower for marker in ('did not match any documents', 'nenhum documento corresponde'))
+    return {
+        'rows': rows,
+        'blocks_found': blocks_found,
+        'http_status': response.status_code,
+        'response_bytes': len(body.encode('utf-8', errors='ignore')),
+        'blocked_hint': blocked_hint,
+        'empty_hint': empty_hint,
+        'response_received': True,
+    }
 
 
 def _classify_type(context: str) -> str:
@@ -909,25 +942,43 @@ def query_builder(registro: str, product: dict[str, Any], max_strategies: int) -
 def source_fetcher(
     runner: Any,
     *,
+    source_name: str,
     query: str,
     timeout_s: float,
     max_results: int,
 ) -> dict[str, Any]:
-    return runner(query, timeout_s=timeout_s, max_results=max_results)
+    result = runner(query, timeout_s=timeout_s, max_results=max_results) or {}
+    rows = result.get('rows', [])
+    if not isinstance(rows, list):
+        rows = []
+    return {
+        'source': source_name,
+        'query': query,
+        'rows': rows,
+        'blocks_found': int(result.get('blocks_found', 0) or 0),
+        'http_status': result.get('http_status'),
+        'response_bytes': int(result.get('response_bytes', 0) or 0),
+        'response_received': bool(result.get('response_received', True)),
+        'blocked_hint': bool(result.get('blocked_hint', False)),
+        'empty_hint': bool(result.get('empty_hint', False)),
+    }
 
 
-def result_parser(raw_rows: list[dict[str, Any]]) -> tuple[list[dict[str, str]], int]:
+def result_parser(raw_rows: list[dict[str, Any]]) -> tuple[list[dict[str, str]], int, list[str]]:
     parsed_rows: list[dict[str, str]] = []
     discarded = 0
+    reasons: list[str] = []
     for raw_row in raw_rows:
         if not isinstance(raw_row, dict):
             discarded += 1
+            reasons.append('row_not_dict')
             continue
         title = _clean(raw_row.get('titulo'))
         link = _clean(raw_row.get('link'))
         resumo = _clean(raw_row.get('resumo'))
         if not title or not link:
             discarded += 1
+            reasons.append('missing_title_or_link')
             continue
         parsed_rows.append(
             {
@@ -938,7 +989,7 @@ def result_parser(raw_rows: list[dict[str, Any]]) -> tuple[list[dict[str, str]],
                 'fonte': _clean(raw_row.get('fonte')) or urlparse(link).netloc.lower(),
             }
         )
-    return parsed_rows, discarded
+    return parsed_rows, discarded, reasons
 
 
 def result_classifier(
@@ -1070,6 +1121,7 @@ def find_related_materials(registro: str, product: dict[str, Any] | None = None)
     deadline = started_at + MATERIALS_TOTAL_TIMEOUT
     total_rows_processed = 0
     total_rows_collected = 0
+    total_rows_raw = 0
     total_filtered_out = 0
     parse_failures = 0
     blocked_sources = 0
@@ -1086,6 +1138,9 @@ def find_related_materials(registro: str, product: dict[str, Any] | None = None)
     parser_attempts = 0
     parser_valid_rows = 0
     parser_discarded_rows = 0
+    response_empty_events = 0
+    blocked_hint_events = 0
+    parser_structure_failures = 0
     pipeline_logs: list[dict[str, Any]] = []
     pipeline_summary = {
         'query_builder': 'success',
@@ -1156,7 +1211,6 @@ def find_related_materials(registro: str, product: dict[str, Any] | None = None)
         for source_name, runner in source_runners:
             source_started = time.perf_counter()
             source_attempts += 1
-            pipeline_summary['source_fetcher'] = 'success'
             checked_sources.add(source_name)
             remaining = deadline - time.perf_counter()
             if remaining <= 0:
@@ -1166,24 +1220,47 @@ def find_related_materials(registro: str, product: dict[str, Any] | None = None)
                 break
             timeout_s = max(0.8, min(per_call_timeout, remaining))
             try:
-                result = source_fetcher(runner, query=strategy.query, timeout_s=timeout_s, max_results=max_rows_per_query)
+                result = source_fetcher(
+                    runner,
+                    source_name=source_name,
+                    query=strategy.query,
+                    timeout_s=timeout_s,
+                    max_results=max_rows_per_query,
+                )
                 source_success_count += 1
+                pipeline_summary['source_fetcher'] = 'success'
                 source_rows = result.get('rows', [])
-                parser_attempts += len(source_rows)
-                parsed_rows, discarded_by_parser = result_parser(source_rows)
+                raw_count = len(source_rows)
+                total_rows_raw += raw_count
+                parser_attempts += raw_count
+                parsed_rows, discarded_by_parser, parser_reasons = result_parser(source_rows)
                 valid_source_rows = len(parsed_rows)
                 parser_valid_rows += valid_source_rows
                 parser_discarded_rows += discarded_by_parser
-                pipeline_summary['result_parser'] = 'success'
+                if discarded_by_parser and valid_source_rows == 0:
+                    parser_structure_failures += 1
+                if valid_source_rows > 0:
+                    pipeline_summary['result_parser'] = 'success'
+                elif pipeline_summary['result_parser'] == 'not_executed':
+                    pipeline_summary['result_parser'] = 'failed'
                 source_rows = parsed_rows
                 rows.extend(source_rows[:max_rows_per_query])
+                if raw_count == 0:
+                    response_empty_events += 1
+                if result.get('blocked_hint'):
+                    blocked_hint_events += 1
                 source_log = {
                     'source': source_name,
                     'status': 'ok',
+                    'raw_rows': raw_count,
                     'rows': len(source_rows),
                     'duration_ms': int((time.perf_counter() - source_started) * 1000),
                 }
                 source_log['blocks'] = result.get('blocks_found', 0)
+                source_log['http_status'] = result.get('http_status')
+                source_log['response_bytes'] = result.get('response_bytes', 0)
+                source_log['blocked_hint'] = bool(result.get('blocked_hint', False))
+                source_log['empty_hint'] = bool(result.get('empty_hint', False))
                 if source_name == 'google_search':
                     visited_urls.append(f'{GOOGLE_SEARCH_URL}?q={quote_plus(strategy.query)}')
                 elif source_name == 'duckduckgo_search':
@@ -1194,10 +1271,11 @@ def find_related_materials(registro: str, product: dict[str, Any] | None = None)
                     source_log['detail'] = 'blocks_without_valid_rows'
                     register_error('result_parser', 'parser_not_found_results', 'Parser encontrou blocos, mas sem linhas válidas.', strategy.name, source_name)
                 if discarded_by_parser:
+                    parser_reason_text = ', '.join(sorted(set(parser_reasons))) or 'invalid_row_structure'
                     register_error(
                         'result_parser',
                         'parser_discarded_rows',
-                        f'Parser descartou {discarded_by_parser} linhas sem estrutura válida.',
+                        f'Parser descartou {discarded_by_parser} linhas sem estrutura válida ({parser_reason_text}).',
                         strategy.name,
                         source_name,
                     )
@@ -1209,23 +1287,33 @@ def find_related_materials(registro: str, product: dict[str, Any] | None = None)
                         'query': strategy.query,
                         'source': source_name,
                         'response_received': True,
-                        'source_results_count': result.get('blocks_found', 0),
+                        'source_results_count': raw_count,
+                        'source_blocks_count': result.get('blocks_found', 0),
                         'parsed_count': valid_source_rows,
                         'parser_discarded_count': discarded_by_parser,
+                        'parser_discard_reasons': sorted(set(parser_reasons)),
+                        'blocked_hint': bool(result.get('blocked_hint', False)),
+                        'empty_hint': bool(result.get('empty_hint', False)),
                         'status': source_log['status'],
                         'duration_ms': source_log['duration_ms'],
                     }
                 )
                 LOGGER.info(
-                    'materials.source.done registro=%s strategy=%s fonte=%s rows=%s duracao_ms=%s',
+                    'materials.source.done registro=%s strategy=%s fonte=%s response_received=%s raw=%s parsed=%s parser_discarded=%s blocked_hint=%s duracao_ms=%s',
                     registro,
                     strategy.name,
                     source_name,
+                    result.get('response_received'),
+                    raw_count,
                     len(source_rows),
+                    discarded_by_parser,
+                    bool(result.get('blocked_hint', False)),
                     source_log['duration_ms'],
                 )
             except requests.Timeout:
                 timeout_events += 1
+                if pipeline_summary['source_fetcher'] == 'not_executed':
+                    pipeline_summary['source_fetcher'] = 'failed'
                 register_error('query_source', 'timeout', f'Timeout ao consultar {source_name}.', strategy.name, source_name)
                 pipeline_logs.append(
                     {
@@ -1238,11 +1326,19 @@ def find_related_materials(registro: str, product: dict[str, Any] | None = None)
                     }
                 )
                 strategy_log['sources'].append(
-                    {'source': source_name, 'status': 'timeout', 'rows': 0, 'duration_ms': int((time.perf_counter() - source_started) * 1000)}
+                    {
+                        'source': source_name,
+                        'status': 'timeout',
+                        'raw_rows': 0,
+                        'rows': 0,
+                        'duration_ms': int((time.perf_counter() - source_started) * 1000),
+                    }
                 )
                 LOGGER.warning('materials.timeout registro=%s fonte=%s strategy=%s', registro, source_name, strategy.name)
             except requests.RequestException as exc:
                 blocked_sources += 1
+                if pipeline_summary['source_fetcher'] == 'not_executed':
+                    pipeline_summary['source_fetcher'] = 'failed'
                 register_error('query_source', 'source_blocked', f'Falha ao consultar {source_name}: {exc}', strategy.name, source_name)
                 pipeline_logs.append(
                     {
@@ -1259,6 +1355,7 @@ def find_related_materials(registro: str, product: dict[str, Any] | None = None)
                     {
                         'source': source_name,
                         'status': 'blocked_source',
+                        'raw_rows': 0,
                         'rows': 0,
                         'error': str(exc),
                         'duration_ms': int((time.perf_counter() - source_started) * 1000),
@@ -1267,6 +1364,8 @@ def find_related_materials(registro: str, product: dict[str, Any] | None = None)
                 LOGGER.warning('materials.error registro=%s fonte=%s strategy=%s erro=%s', registro, source_name, strategy.name, exc)
             except Exception as exc:
                 unexpected_failure = True
+                if pipeline_summary['source_fetcher'] == 'not_executed':
+                    pipeline_summary['source_fetcher'] = 'failed'
                 register_error('query_source', 'unexpected_error', f'Erro inesperado ao consultar {source_name}: {exc}', strategy.name, source_name)
                 pipeline_logs.append(
                     {
@@ -1283,6 +1382,7 @@ def find_related_materials(registro: str, product: dict[str, Any] | None = None)
                     {
                         'source': source_name,
                         'status': 'unexpected_error',
+                        'raw_rows': 0,
                         'rows': 0,
                         'error': str(exc),
                         'duration_ms': int((time.perf_counter() - source_started) * 1000),
@@ -1327,11 +1427,21 @@ def find_related_materials(registro: str, product: dict[str, Any] | None = None)
                 total_filtered_out += 1
                 reason = row.get('discard_reason', 'unknown')
                 discard_reasons[reason] = discard_reasons.get(reason, 0) + 1
+                LOGGER.info(
+                    'materials.result.discarded registro=%s strategy=%s fonte=%s motivo=%s titulo="%s"',
+                    registro,
+                    strategy.name,
+                    row.get('fonte'),
+                    reason,
+                    row.get('titulo', '')[:120],
+                )
                 pipeline_logs.append(
                     {
                         'step': 'result_filter',
                         'strategy': strategy.name,
                         'query': strategy.query,
+                        'source': row.get('fonte'),
+                        'title': row.get('titulo'),
                         'discard_reason': reason,
                     }
                 )
@@ -1378,18 +1488,20 @@ def find_related_materials(registro: str, product: dict[str, Any] | None = None)
         status = 'unexpected_error'
     elif timeout_events and not deduped and source_success_count == 0:
         status = 'timeout'
-    elif blocked_sources and not deduped and source_success_count == 0:
+    elif (blocked_sources > 0 or blocked_hint_events > 0) and not deduped and parser_valid_rows == 0:
         status = 'blocked'
-    elif parse_failures and not deduped and total_rows_collected == 0:
+    elif (parse_failures > 0 or parser_structure_failures > 0) and not deduped and total_rows_collected == 0:
         status = 'parse_failed'
     elif source_attempts > 0 and source_success_count == 0 and not deduped:
         status = 'collection_failed'
-    elif source_success_count > 0 and parser_valid_rows == 0 and not deduped:
+    elif source_success_count > 0 and total_rows_raw > 0 and parser_valid_rows == 0 and not deduped:
         status = 'parse_failed'
-    elif source_success_count > 0 and total_rows_collected == 0 and not deduped:
+    elif source_success_count > 0 and total_rows_raw == 0 and not deduped:
+        status = 'collection_failed'
+    elif total_rows_collected > 0 and not deduped and total_filtered_out >= total_rows_processed:
         status = 'no_results'
     elif total_rows_collected > 0 and not deduped:
-        status = 'no_results'
+        status = 'collection_failed'
     elif deduped and (timed_out or blocked_sources or parse_failures or unexpected_failure):
         status = 'partial_success'
 
@@ -1398,9 +1510,9 @@ def find_related_materials(registro: str, product: dict[str, Any] | None = None)
         {
             'step': 'result_formatter',
             'status': status,
-            'raw_results_count': total_rows_collected,
+            'raw_results_count': total_rows_raw,
             'accepted_results_count': len(deduped),
-            'discarded_results_count': total_filtered_out + dedupe_removed_count,
+            'discarded_results_count': max(0, total_rows_raw - len(deduped)),
         }
     )
     diagnostics = {
@@ -1408,9 +1520,9 @@ def find_related_materials(registro: str, product: dict[str, Any] | None = None)
         'errors': errors,
         'queries_used': [item.query for item in queries],
         'sources_checked': sorted(checked_sources),
-        'raw_results_count': total_rows_collected,
+        'raw_results_count': total_rows_raw,
         'accepted_results_count': len(deduped),
-        'discarded_results_count': total_filtered_out + dedupe_removed_count,
+        'discarded_results_count': max(0, total_rows_raw - len(deduped)),
         'dedupe_removed_count': dedupe_removed_count,
         'discard_reasons': discard_reasons,
         'duration_ms': duration_ms,
@@ -1422,6 +1534,11 @@ def find_related_materials(registro: str, product: dict[str, Any] | None = None)
         'pipeline_summary': pipeline_summary,
         'source_attempts': source_attempts,
         'source_success_count': source_success_count,
+        'blocked_sources_count': blocked_sources,
+        'blocked_hint_events': blocked_hint_events,
+        'response_empty_events': response_empty_events,
+        'parse_failures': parse_failures,
+        'parser_structure_failures': parser_structure_failures,
         'parser_attempts': parser_attempts,
         'parser_valid_rows': parser_valid_rows,
         'parser_discarded_rows': parser_discarded_rows,
@@ -1431,7 +1548,7 @@ def find_related_materials(registro: str, product: dict[str, Any] | None = None)
         'materials.done registro=%s status=%s raw=%s accepted=%s discarded=%s timeout_events=%s blocked=%s parse_failures=%s duracao_ms=%s errors=%s',
         registro,
         status,
-        total_rows_collected,
+        total_rows_raw,
         len(deduped),
         diagnostics['discarded_results_count'],
         timeout_events,
