@@ -122,11 +122,11 @@ def search_by_registration(value: str) -> dict[str, Any]:
         LOGGER.exception('search.materials.error registro=%s erro=%s', registro, exc)
         materials_result = {
             'items': [],
-            'status': 'unexpected_error',
+            'status': 'error',
             'warning': 'Não foi possível concluir a busca por erro inesperado.',
             'source': [],
             'recommended_searches': [],
-            'diagnostics': {'search_status': 'unexpected_error', 'reason': str(exc), 'errors': [{'step': 'materials_thread', 'type': 'unexpected_error', 'message': str(exc)}]},
+            'diagnostics': {'search_status': 'error', 'reason': str(exc), 'errors': [{'step': 'materials_thread', 'type': 'unexpected_error', 'message': str(exc)}]},
         }
 
     enrichment_result = enrich_product_data(
