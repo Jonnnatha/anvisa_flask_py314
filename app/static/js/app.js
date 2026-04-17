@@ -147,13 +147,17 @@ function renderGeneratedQueries(diagnostics) {
 
 function renderDiagnosticsSummary(diagnostics) {
   if (!diagnostics || typeof diagnostics !== 'object') return '';
+  const queriesCount = Array.isArray(diagnostics.queries_used) ? diagnostics.queries_used.length : 0;
+  const sourcesChecked = Array.isArray(diagnostics.sources_checked) ? diagnostics.sources_checked : [];
+  const sourcesLabel = sourcesChecked.length ? sourcesChecked.join(' · ') : 'nenhuma fonte registrada';
   const rows = [
     ['Status da busca', diagnostics.search_status],
-    ['Consultas usadas', Array.isArray(diagnostics.queries_used) ? diagnostics.queries_used.length : undefined],
-    ['Fontes consultadas', Array.isArray(diagnostics.sources_checked) ? diagnostics.sources_checked.join(' · ') : undefined],
-    ['Resultados brutos', diagnostics.raw_results_count],
-    ['Resultados aceitos', diagnostics.accepted_results_count],
-    ['Resultados descartados', diagnostics.discarded_results_count],
+    ['Consultas usadas', queriesCount],
+    ['Fontes consultadas', sourcesLabel],
+    ['Resultados brutos', diagnostics.raw_results_count ?? 0],
+    ['Resultados aceitos', diagnostics.accepted_results_count ?? 0],
+    ['Resultados descartados', diagnostics.discarded_results_count ?? 0],
+    ['Erros de pipeline', Array.isArray(diagnostics.errors) ? diagnostics.errors.length : 0],
   ]
     .filter(([, value]) => value !== undefined && value !== null && String(value).trim() !== '')
     .map(([label, value]) => `<li><strong>${escapeHtml(label)}:</strong> ${escapeHtml(value)}</li>`)
@@ -180,6 +184,21 @@ function renderDiagnosticsErrors(diagnostics) {
     <div class="recommended-searches">
       <h4>Erros identificados na pesquisa</h4>
       <ul>${items}</ul>
+    </div>
+  `;
+}
+
+function renderPipelineSummary(diagnostics) {
+  const summary = diagnostics?.pipeline_summary;
+  if (!summary || typeof summary !== 'object') return '';
+  const rows = Object.entries(summary).map(([stage, status]) =>
+    `<li><strong>${escapeHtml(stage)}:</strong> ${escapeHtml(status || 'not_executed')}</li>`
+  ).join('');
+  if (!rows) return '';
+  return `
+    <div class="recommended-searches">
+      <h4>Etapas do pipeline</h4>
+      <ul>${rows}</ul>
     </div>
   `;
 }
@@ -226,9 +245,10 @@ function render(data) {
   const generatedQueriesHtml = renderGeneratedQueries(diagnostics);
   const diagnosticsSummaryHtml = renderDiagnosticsSummary(diagnostics);
   const diagnosticsErrorsHtml = renderDiagnosticsErrors(diagnostics);
+  const pipelineSummaryHtml = renderPipelineSummary(diagnostics);
   const materialsHtml = materials.length
-    ? `${primaryMessage ? `<p>${escapeHtml(primaryMessage)}</p>` : ''}${materials.map(renderMaterial).join('')}${diagnosticsErrorsHtml}${recommendedHtml}${generatedQueriesHtml}${diagnosticsSummaryHtml}`
-    : `<p>${escapeHtml(primaryMessage || 'Não foi possível concluir a busca automática de materiais nesta consulta.')}</p>${diagnosticsErrorsHtml}${recommendedHtml}${generatedQueriesHtml}${diagnosticsSummaryHtml}`;
+    ? `${primaryMessage ? `<p>${escapeHtml(primaryMessage)}</p>` : ''}${materials.map(renderMaterial).join('')}${diagnosticsErrorsHtml}${recommendedHtml}${generatedQueriesHtml}${diagnosticsSummaryHtml}${pipelineSummaryHtml}`
+    : `<p>${escapeHtml(primaryMessage || 'Não foi possível concluir a busca automática de materiais nesta consulta.')}</p>${diagnosticsErrorsHtml}${recommendedHtml}${generatedQueriesHtml}${diagnosticsSummaryHtml}${pipelineSummaryHtml}`;
 
   resultado.innerHTML = `
     <div class="box">
