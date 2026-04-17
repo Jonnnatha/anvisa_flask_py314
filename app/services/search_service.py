@@ -46,6 +46,35 @@ def _build_base_response(registro: str) -> dict[str, Any]:
     }
 
 
+def _fallback_materials_diagnostics(status: str, message: str, step: str, error_type: str) -> dict[str, Any]:
+    return {
+        'search_status': status,
+        'errors': [{'step': step, 'type': error_type, 'message': message}],
+        'queries_used': [],
+        'sources_checked': [],
+        'raw_results_count': 0,
+        'accepted_results_count': 0,
+        'discarded_results_count': 0,
+        'dedupe_removed_count': 0,
+        'discard_reasons': {},
+        'duration_ms': 0,
+        'query_metadata': {},
+        'strategies': [],
+        'strategy_feedback': {},
+        'generated_queries': [],
+        'pipeline_logs': [],
+        'pipeline_summary': {
+            'query_builder': 'not_executed',
+            'source_fetcher': 'not_executed',
+            'result_parser': 'not_executed',
+            'result_classifier': 'not_executed',
+            'result_ranker': 'not_executed',
+            'result_filter': 'not_executed',
+            'result_formatter': 'not_executed',
+        },
+    }
+
+
 def search_by_registration(value: str) -> dict[str, Any]:
     registro = validate_registration(value)
     result = _build_base_response(registro)
@@ -116,17 +145,27 @@ def search_by_registration(value: str) -> dict[str, Any]:
             'warning': MATERIALS_TIMEOUT_WARNING,
             'source': [],
             'recommended_searches': [],
-            'diagnostics': {'search_status': 'timeout', 'reason': 'future_timeout', 'errors': [{'step': 'materials_thread', 'type': 'timeout', 'message': 'Tempo limite excedido na execução da busca de materiais.'}]},
+            'diagnostics': _fallback_materials_diagnostics(
+                'timeout',
+                'Tempo limite excedido na execução da busca de materiais.',
+                'materials_thread',
+                'timeout',
+            ),
         }
     except Exception as exc:
         LOGGER.exception('search.materials.error registro=%s erro=%s', registro, exc)
         materials_result = {
             'items': [],
-            'status': 'error',
+            'status': 'unexpected_error',
             'warning': 'Não foi possível concluir a busca por erro inesperado.',
             'source': [],
             'recommended_searches': [],
-            'diagnostics': {'search_status': 'error', 'reason': str(exc), 'errors': [{'step': 'materials_thread', 'type': 'unexpected_error', 'message': str(exc)}]},
+            'diagnostics': _fallback_materials_diagnostics(
+                'unexpected_error',
+                str(exc),
+                'materials_thread',
+                'unexpected_error',
+            ),
         }
 
     enrichment_result = enrich_product_data(

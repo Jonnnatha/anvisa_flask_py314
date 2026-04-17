@@ -200,6 +200,9 @@ MATERIALS_STATUS_MESSAGES = {
     'partial_success': 'A busca encontrou materiais, mas foi encerrada antes de concluir todas as etapas.',
     'blocked': 'A fonte de pesquisa bloqueou a consulta automática.',
     'timeout': 'A busca falhou por timeout nesta consulta.',
+    'parse_failed': 'A coleta automática recebeu resposta, mas não conseguiu interpretar os resultados.',
+    'collection_failed': 'A busca automática não conseguiu coletar resultados estruturados das fontes.',
+    'unexpected_error': 'Não foi possível concluir a busca por erro inesperado.',
     'error': 'Não foi possível concluir a busca por erro inesperado.',
     'no_results': 'Nenhum material técnico público relevante foi encontrado para este produto.',
 }
@@ -899,6 +902,111 @@ def _strategy_rank_bonus(feedback: dict[str, dict[str, Any]], strategy: SearchSt
     return 0
 
 
+def query_builder(registro: str, product: dict[str, Any], max_strategies: int) -> tuple[list[SearchStrategy], dict[str, Any]]:
+    return _build_adaptive_queries(registro, product, max_strategies)
+
+
+def source_fetcher(
+    runner: Any,
+    *,
+    query: str,
+    timeout_s: float,
+    max_results: int,
+) -> dict[str, Any]:
+    return runner(query, timeout_s=timeout_s, max_results=max_results)
+
+
+def result_parser(raw_rows: list[dict[str, Any]]) -> tuple[list[dict[str, str]], int]:
+    parsed_rows: list[dict[str, str]] = []
+    discarded = 0
+    for raw_row in raw_rows:
+        if not isinstance(raw_row, dict):
+            discarded += 1
+            continue
+        title = _clean(raw_row.get('titulo'))
+        link = _clean(raw_row.get('link'))
+        resumo = _clean(raw_row.get('resumo'))
+        if not title or not link:
+            discarded += 1
+            continue
+        parsed_rows.append(
+            {
+                'titulo': title,
+                'link': link,
+                'resumo': resumo,
+                'contexto': _normalize(raw_row.get('contexto') or f'{title} {resumo} {link}'),
+                'fonte': _clean(raw_row.get('fonte')) or urlparse(link).netloc.lower(),
+            }
+        )
+    return parsed_rows, discarded
+
+
+def result_classifier(
+    row: dict[str, str],
+    registro: str,
+    identity: dict[str, str],
+    product_tokens: list[str],
+    manufacturer_domains: list[str],
+    strategy: SearchStrategy,
+) -> dict[str, Any] | None:
+    return _score_relevance(
+        row,
+        registro=registro,
+        identity=identity,
+        product_tokens=product_tokens,
+        manufacturer_domains=manufacturer_domains,
+        strategy=strategy,
+    )
+
+
+def result_ranker(evaluated: dict[str, Any], strategy_feedback: dict[str, dict[str, Any]], strategy: SearchStrategy) -> dict[str, Any]:
+    evaluated['score'] += _strategy_rank_bonus(strategy_feedback, strategy)
+    return evaluated
+
+
+def result_filter(evaluated: dict[str, Any] | None) -> bool:
+    return bool(evaluated)
+
+
+def result_formatter(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return _dedupe_items(items)
+
+
+def _empty_diagnostics(
+    status: str,
+    started_at: float,
+    *,
+    query_metadata: dict[str, Any] | None = None,
+    errors: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    return {
+        'search_status': status,
+        'errors': errors or [],
+        'queries_used': [],
+        'sources_checked': [],
+        'raw_results_count': 0,
+        'accepted_results_count': 0,
+        'discarded_results_count': 0,
+        'dedupe_removed_count': 0,
+        'discard_reasons': {},
+        'duration_ms': int((time.perf_counter() - started_at) * 1000),
+        'query_metadata': query_metadata or {},
+        'strategies': [],
+        'strategy_feedback': {},
+        'generated_queries': [],
+        'pipeline_logs': [],
+        'pipeline_summary': {
+            'query_builder': 'not_executed',
+            'source_fetcher': 'not_executed',
+            'result_parser': 'not_executed',
+            'result_classifier': 'not_executed',
+            'result_ranker': 'not_executed',
+            'result_filter': 'not_executed',
+            'result_formatter': 'not_executed',
+        },
+    }
+
+
 def find_related_materials(registro: str, product: dict[str, Any] | None = None) -> dict[str, Any]:
     product = product or {}
     identity = _product_identity(product)
@@ -911,48 +1019,35 @@ def find_related_materials(registro: str, product: dict[str, Any] | None = None)
     ]
 
     try:
-        queries, query_metadata = _build_adaptive_queries(registro, product, MATERIALS_MAX_STRATEGIES)
+        queries, query_metadata = query_builder(registro, product, MATERIALS_MAX_STRATEGIES)
     except Exception as exc:
         LOGGER.exception('materials.query_build.error registro=%s erro=%s', registro, exc)
-        diagnostics = {
-            'search_status': 'error',
-            'errors': [{'step': 'build_query', 'type': 'erro_ao_montar_query', 'message': str(exc)}],
-            'queries_used': [],
-            'sources_checked': [],
-            'raw_results_count': 0,
-            'accepted_results_count': 0,
-            'discarded_results_count': 0,
-            'discard_reasons': {},
-            'duration_ms': int((time.perf_counter() - started_at) * 1000),
-            'query_metadata': {},
-            'strategies': [],
-        }
+        diagnostics = _empty_diagnostics(
+            'unexpected_error',
+            started_at,
+            errors=[{'step': 'query_builder', 'type': 'erro_ao_montar_query', 'message': str(exc)}],
+        )
+        diagnostics['pipeline_summary']['query_builder'] = 'failed'
         return {
             'items': [],
-            'status': 'error',
-            'warning': MATERIALS_STATUS_MESSAGES['error'],
+            'status': 'unexpected_error',
+            'warning': MATERIALS_STATUS_MESSAGES['unexpected_error'],
             'source': [],
             'recommended_searches': recommended_searches,
             'diagnostics': diagnostics,
         }
 
     if not queries:
-        diagnostics = {
-            'search_status': 'no_results',
-            'errors': [{'step': 'build_query', 'type': 'erro_ao_montar_query', 'message': 'missing_query_terms'}],
-            'queries_used': [],
-            'sources_checked': [],
-            'raw_results_count': 0,
-            'accepted_results_count': 0,
-            'discarded_results_count': 0,
-            'discard_reasons': {},
-            'duration_ms': int((time.perf_counter() - started_at) * 1000),
-            'query_metadata': query_metadata,
-            'strategies': [],
-        }
+        diagnostics = _empty_diagnostics(
+            'collection_failed',
+            started_at,
+            query_metadata=query_metadata,
+            errors=[{'step': 'query_builder', 'type': 'erro_ao_montar_query', 'message': 'missing_query_terms'}],
+        )
+        diagnostics['pipeline_summary']['query_builder'] = 'failed'
         return {
             'items': [],
-            'status': 'no_results',
+            'status': 'collection_failed',
             'warning': 'Nenhum termo suficiente foi encontrado para busca de materiais técnicos.',
             'source': [GOVBR_SEARCH_URL],
             'recommended_searches': recommended_searches,
@@ -986,6 +1081,21 @@ def find_related_materials(registro: str, product: dict[str, Any] | None = None)
     errors: list[dict[str, Any]] = []
     unexpected_failure = False
     dedupe_removed_count = 0
+    source_attempts = 0
+    source_success_count = 0
+    parser_attempts = 0
+    parser_valid_rows = 0
+    parser_discarded_rows = 0
+    pipeline_logs: list[dict[str, Any]] = []
+    pipeline_summary = {
+        'query_builder': 'success',
+        'source_fetcher': 'not_executed',
+        'result_parser': 'not_executed',
+        'result_classifier': 'not_executed',
+        'result_ranker': 'not_executed',
+        'result_filter': 'not_executed',
+        'result_formatter': 'not_executed',
+    }
 
     def register_error(step: str, error_type: str, message: str, strategy_name: str, source_name: str | None = None) -> None:
         errors.append(
@@ -1020,6 +1130,14 @@ def find_related_materials(registro: str, product: dict[str, Any] | None = None)
             'accepted': 0,
         }
         LOGGER.info('materials.query.built registro=%s strategy=%s query="%s"', registro, strategy.name, strategy.query)
+        pipeline_logs.append(
+            {
+                'step': 'query_builder',
+                'strategy': strategy.name,
+                'query': strategy.query,
+                'status': 'generated',
+            }
+        )
         if time.perf_counter() >= deadline:
             timeout_events += 1
             strategy_log['aborted'] = 'deadline_reached'
@@ -1037,6 +1155,8 @@ def find_related_materials(registro: str, product: dict[str, Any] | None = None)
 
         for source_name, runner in source_runners:
             source_started = time.perf_counter()
+            source_attempts += 1
+            pipeline_summary['source_fetcher'] = 'success'
             checked_sources.add(source_name)
             remaining = deadline - time.perf_counter()
             if remaining <= 0:
@@ -1046,8 +1166,16 @@ def find_related_materials(registro: str, product: dict[str, Any] | None = None)
                 break
             timeout_s = max(0.8, min(per_call_timeout, remaining))
             try:
-                result = runner(strategy.query, timeout_s=timeout_s, max_results=max_rows_per_query)
+                result = source_fetcher(runner, query=strategy.query, timeout_s=timeout_s, max_results=max_rows_per_query)
+                source_success_count += 1
                 source_rows = result.get('rows', [])
+                parser_attempts += len(source_rows)
+                parsed_rows, discarded_by_parser = result_parser(source_rows)
+                valid_source_rows = len(parsed_rows)
+                parser_valid_rows += valid_source_rows
+                parser_discarded_rows += discarded_by_parser
+                pipeline_summary['result_parser'] = 'success'
+                source_rows = parsed_rows
                 rows.extend(source_rows[:max_rows_per_query])
                 source_log = {
                     'source': source_name,
@@ -1064,8 +1192,30 @@ def find_related_materials(registro: str, product: dict[str, Any] | None = None)
                     parse_failures += 1
                     source_log['status'] = 'parse_failure'
                     source_log['detail'] = 'blocks_without_valid_rows'
-                    register_error('parse_source', 'parser_not_found_results', 'Parser encontrou blocos, mas sem linhas válidas.', strategy.name, source_name)
+                    register_error('result_parser', 'parser_not_found_results', 'Parser encontrou blocos, mas sem linhas válidas.', strategy.name, source_name)
+                if discarded_by_parser:
+                    register_error(
+                        'result_parser',
+                        'parser_discarded_rows',
+                        f'Parser descartou {discarded_by_parser} linhas sem estrutura válida.',
+                        strategy.name,
+                        source_name,
+                    )
                 strategy_log['sources'].append(source_log)
+                pipeline_logs.append(
+                    {
+                        'step': 'source_fetcher',
+                        'strategy': strategy.name,
+                        'query': strategy.query,
+                        'source': source_name,
+                        'response_received': True,
+                        'source_results_count': result.get('blocks_found', 0),
+                        'parsed_count': valid_source_rows,
+                        'parser_discarded_count': discarded_by_parser,
+                        'status': source_log['status'],
+                        'duration_ms': source_log['duration_ms'],
+                    }
+                )
                 LOGGER.info(
                     'materials.source.done registro=%s strategy=%s fonte=%s rows=%s duracao_ms=%s',
                     registro,
@@ -1077,6 +1227,16 @@ def find_related_materials(registro: str, product: dict[str, Any] | None = None)
             except requests.Timeout:
                 timeout_events += 1
                 register_error('query_source', 'timeout', f'Timeout ao consultar {source_name}.', strategy.name, source_name)
+                pipeline_logs.append(
+                    {
+                        'step': 'source_fetcher',
+                        'strategy': strategy.name,
+                        'query': strategy.query,
+                        'source': source_name,
+                        'response_received': False,
+                        'status': 'timeout',
+                    }
+                )
                 strategy_log['sources'].append(
                     {'source': source_name, 'status': 'timeout', 'rows': 0, 'duration_ms': int((time.perf_counter() - source_started) * 1000)}
                 )
@@ -1084,6 +1244,17 @@ def find_related_materials(registro: str, product: dict[str, Any] | None = None)
             except requests.RequestException as exc:
                 blocked_sources += 1
                 register_error('query_source', 'source_blocked', f'Falha ao consultar {source_name}: {exc}', strategy.name, source_name)
+                pipeline_logs.append(
+                    {
+                        'step': 'source_fetcher',
+                        'strategy': strategy.name,
+                        'query': strategy.query,
+                        'source': source_name,
+                        'response_received': False,
+                        'status': 'blocked',
+                        'error': str(exc),
+                    }
+                )
                 strategy_log['sources'].append(
                     {
                         'source': source_name,
@@ -1097,6 +1268,17 @@ def find_related_materials(registro: str, product: dict[str, Any] | None = None)
             except Exception as exc:
                 unexpected_failure = True
                 register_error('query_source', 'unexpected_error', f'Erro inesperado ao consultar {source_name}: {exc}', strategy.name, source_name)
+                pipeline_logs.append(
+                    {
+                        'step': 'source_fetcher',
+                        'strategy': strategy.name,
+                        'query': strategy.query,
+                        'source': source_name,
+                        'response_received': False,
+                        'status': 'unexpected_error',
+                        'error': str(exc),
+                    }
+                )
                 strategy_log['sources'].append(
                     {
                         'source': source_name,
@@ -1117,6 +1299,9 @@ def find_related_materials(registro: str, product: dict[str, Any] | None = None)
         LOGGER.info('materials.strategy.collected registro=%s strategy=%s rows=%s', registro, strategy.name, len(rows))
 
         for row in rows[:max_rows_per_query]:
+            pipeline_summary['result_classifier'] = 'success'
+            pipeline_summary['result_ranker'] = 'success'
+            pipeline_summary['result_filter'] = 'success'
             if time.perf_counter() >= deadline:
                 timeout_events += 1
                 register_error('score_rows', 'timeout', 'Tempo total da busca excedido durante avaliação de resultados.', strategy.name)
@@ -1125,7 +1310,7 @@ def find_related_materials(registro: str, product: dict[str, Any] | None = None)
             if total_rows_processed >= max_rows_total:
                 LOGGER.info('materials.limit_rows registro=%s limite=%s', registro, max_rows_total)
                 break
-            evaluated = _score_relevance(
+            evaluated = result_classifier(
                 row,
                 registro=registro,
                 identity=identity,
@@ -1133,8 +1318,8 @@ def find_related_materials(registro: str, product: dict[str, Any] | None = None)
                 manufacturer_domains=manufacturer_domains,
                 strategy=strategy,
             )
-            if evaluated:
-                evaluated['score'] += _strategy_rank_bonus(strategy_feedback, strategy)
+            if result_filter(evaluated):
+                evaluated = result_ranker(evaluated, strategy_feedback, strategy)
                 ranked.append(evaluated)
                 strategy_log['accepted'] += 1
             else:
@@ -1142,6 +1327,14 @@ def find_related_materials(registro: str, product: dict[str, Any] | None = None)
                 total_filtered_out += 1
                 reason = row.get('discard_reason', 'unknown')
                 discard_reasons[reason] = discard_reasons.get(reason, 0) + 1
+                pipeline_logs.append(
+                    {
+                        'step': 'result_filter',
+                        'strategy': strategy.name,
+                        'query': strategy.query,
+                        'discard_reason': reason,
+                    }
+                )
             total_rows_processed += 1
 
         bucket = strategy_feedback.setdefault(strategy.intent, {'accepted': 0, 'queries': 0})
@@ -1151,7 +1344,7 @@ def find_related_materials(registro: str, product: dict[str, Any] | None = None)
 
         if total_rows_processed >= max_rows_total:
             break
-        current_top = _dedupe_items(list(ranked))[:MATERIALS_EARLY_STOP_RESULTS]
+        current_top = result_formatter(list(ranked))[:MATERIALS_EARLY_STOP_RESULTS]
         high_quality_hits = [
             item for item in current_top if item.get('tipo') != 'possible_material' and item.get('nivel_confianca') in {'medio', 'alto'}
         ]
@@ -1160,14 +1353,15 @@ def find_related_materials(registro: str, product: dict[str, Any] | None = None)
             break
 
     pre_dedupe_count = len(ranked)
-    deduped = _dedupe_items(ranked)
+    pipeline_summary['result_formatter'] = 'success'
+    deduped = result_formatter(ranked)
     dedupe_removed_count = max(0, pre_dedupe_count - len(deduped))
     if not deduped and fallback_rows:
-        fallback_items = _dedupe_items(_fallback_from_rows(fallback_rows, identity))
+        fallback_items = result_formatter(_fallback_from_rows(fallback_rows, identity))
         if fallback_items:
             deduped = fallback_items
     elif len(deduped) < 3 and fallback_rows:
-        merged = _dedupe_items([*deduped, *_fallback_from_rows(fallback_rows, identity)])
+        merged = result_formatter([*deduped, *_fallback_from_rows(fallback_rows, identity)])
         dedupe_removed_count += max(0, len(deduped) - len(merged))
         deduped = merged[: max(3, len(deduped))]
 
@@ -1181,17 +1375,34 @@ def find_related_materials(registro: str, product: dict[str, Any] | None = None)
 
     status = 'success'
     if unexpected_failure and not deduped:
-        status = 'error'
-    elif timeout_events and not deduped:
+        status = 'unexpected_error'
+    elif timeout_events and not deduped and source_success_count == 0:
         status = 'timeout'
-    elif blocked_sources and not deduped:
+    elif blocked_sources and not deduped and source_success_count == 0:
         status = 'blocked'
-    elif not total_rows_collected and not deduped:
+    elif parse_failures and not deduped and total_rows_collected == 0:
+        status = 'parse_failed'
+    elif source_attempts > 0 and source_success_count == 0 and not deduped:
+        status = 'collection_failed'
+    elif source_success_count > 0 and parser_valid_rows == 0 and not deduped:
+        status = 'parse_failed'
+    elif source_success_count > 0 and total_rows_collected == 0 and not deduped:
+        status = 'no_results'
+    elif total_rows_collected > 0 and not deduped:
         status = 'no_results'
     elif deduped and (timed_out or blocked_sources or parse_failures or unexpected_failure):
         status = 'partial_success'
 
     duration_ms = int((time.perf_counter() - started_at) * 1000)
+    pipeline_logs.append(
+        {
+            'step': 'result_formatter',
+            'status': status,
+            'raw_results_count': total_rows_collected,
+            'accepted_results_count': len(deduped),
+            'discarded_results_count': total_filtered_out + dedupe_removed_count,
+        }
+    )
     diagnostics = {
         'search_status': status,
         'errors': errors,
@@ -1207,6 +1418,13 @@ def find_related_materials(registro: str, product: dict[str, Any] | None = None)
         'strategy_feedback': strategy_feedback,
         'query_metadata': query_metadata,
         'generated_queries': [item.query for item in queries[:10]],
+        'pipeline_logs': pipeline_logs,
+        'pipeline_summary': pipeline_summary,
+        'source_attempts': source_attempts,
+        'source_success_count': source_success_count,
+        'parser_attempts': parser_attempts,
+        'parser_valid_rows': parser_valid_rows,
+        'parser_discarded_rows': parser_discarded_rows,
     }
 
     LOGGER.info(
