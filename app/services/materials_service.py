@@ -179,6 +179,17 @@ USEFUL_TERMS = (
     'fsca',
 )
 
+GENERIC_ANVISA_PATH_HINTS = (
+    '/assuntos/',
+    '/assuntos',
+    '/pt-br/assuntos',
+    '/servicos',
+    '/acesso-a-informacao',
+    '/anvisa-',
+)
+
+TECHNICAL_FILE_EXTENSIONS = ('.pdf', '.doc', '.docx', '.xls', '.xlsx', '.ppt', '.pptx')
+
 MANDATORY_QUERY_SUFFIXES: tuple[tuple[str, str], ...] = (
     ('manual', 'product_manual'),
     ('IFU', 'product_ifu'),
@@ -631,8 +642,15 @@ def _url_signal(link: str) -> dict[str, Any]:
     generic_hits = sum(1 for hint in GENERIC_URL_PATTERNS if hint in path_query)
     path_segments = [segment for segment in path.split('/') if segment]
     root_like = len(path_segments) <= 1
-    looks_document = any(ext in path for ext in ('.pdf', '.doc', '.docx', '.xls', '.xlsx', '.ppt', '.pptx'))
+    looks_document = any(ext in path for ext in TECHNICAL_FILE_EXTENSIONS)
     looks_navigation = root_like or generic_hits > 0
+    file_extension = ''
+    for ext in TECHNICAL_FILE_EXTENSIONS:
+        if path.endswith(ext):
+            file_extension = ext
+            break
+    if not file_extension and '.pdf?' in path_query:
+        file_extension = '.pdf'
 
     return {
         'useful_hits': useful_hits,
@@ -640,6 +658,30 @@ def _url_signal(link: str) -> dict[str, Any]:
         'root_like': root_like,
         'looks_document': looks_document,
         'looks_navigation': looks_navigation,
+        'file_extension': file_extension,
+    }
+
+
+def _extract_technical_signals(title: str, snippet: str, link: str, material_type: str, is_pdf: bool) -> dict[str, bool]:
+    text = _normalize(f'{title} {snippet}')
+    url_text = _normalize(link)
+    return {
+        'has_pdf_signal': is_pdf or '.pdf' in url_text,
+        'has_manual_signal': _has_useful_term(title, snippet, link),
+        'has_specific_doc_type': material_type in {
+            'manual',
+            'ifu',
+            'service_manual',
+            'training',
+            'recall',
+            'safety_notice',
+            'field_corrective_action',
+            'technical_bulletin',
+            'manufacturer_document',
+            'technical_document',
+        },
+        'has_download_signal': any(marker in url_text for marker in ('download', 'uploads', 'arquivo', 'document')),
+        'text_mentions_doc': any(marker in text for marker in ('manual', 'ifu', 'instruções de uso', 'service manual', 'recall', 'safety')),
     }
 
 
@@ -722,6 +764,7 @@ def _score_relevance(
 
     domain = row.get('fonte', '')
     domain_score = _domain_relevance_score(domain, manufacturer_domains)
+    trusted_domain = domain_score >= 52
     score += domain_score
     if is_pdf:
         score += 18
@@ -780,6 +823,16 @@ def _score_relevance(
         row['discard_reason'] = 'missing_technical_signal'
         return None
 
+    anvisa_generic_page = (
+        domain.endswith('anvisa.gov.br')
+        and any(fragment in link for fragment in GENERIC_ANVISA_PATH_HINTS)
+        and not is_pdf
+        and material_type in {'possible_material', 'public_signal'}
+    )
+    if anvisa_generic_page and not product_in_title and not product_in_snippet:
+        row['discard_reason'] = 'generic_anvisa_page'
+        return None
+
     if not strong_relation:
         minimal_relation = (
             product_hit
@@ -814,10 +867,33 @@ def _score_relevance(
     if not strong_relation and plausible_candidate:
         score += 12
 
+    technical_signals = _extract_technical_signals(row['titulo'], row.get('resumo', ''), row['link'], material_type, is_pdf)
+
+    high_confidence_signals = sum(
+        [
+            bool(product_in_title),
+            bool(technical_signals['has_specific_doc_type']),
+            bool(technical_signals['has_manual_signal']),
+            bool(technical_signals['has_pdf_signal']),
+            bool(trusted_domain),
+            bool(strong_relation),
+        ]
+    )
+    medium_confidence_signals = sum(
+        [
+            bool(product_in_snippet),
+            bool(manufacturer_in_title_or_snippet),
+            bool(model_in_title_or_snippet),
+            bool(token_hits >= 2),
+            bool(technical_signals['text_mentions_doc'] or technical_signals['has_download_signal']),
+            bool(trusted_domain),
+        ]
+    )
+
     confidence = 'baixo'
-    if score >= 188:
+    if score >= 210 and high_confidence_signals >= 4:
         confidence = 'alto'
-    elif score >= 118:
+    elif score >= 130 and (high_confidence_signals >= 3 or medium_confidence_signals >= 4):
         confidence = 'medio'
 
     if score < 50 and not plausible_candidate:
@@ -830,10 +906,14 @@ def _score_relevance(
         if confidence == 'alto':
             confidence = 'medio'
 
+    if confidence == 'alto' and not (product_in_title and technical_signals['has_specific_doc_type']):
+        confidence = 'medio'
+
     return {
         'titulo': row['titulo'],
         'tipo': item_type,
         'is_pdf': is_pdf,
+        'extensao_arquivo': url_signal['file_extension'] or ('.pdf' if is_pdf else ''),
         'fonte': row['fonte'],
         'link': row['link'],
         'resumo': row['resumo'],

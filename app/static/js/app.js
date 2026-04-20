@@ -97,6 +97,9 @@ function renderMaterial(item) {
   const tipo = materialBadge(item);
   const fonte = item.fonte || 'Fonte pública';
   const resumo = String(item.resumo || '').trim();
+  const confianca = String(item.nivel_confianca || 'baixo').trim().toLowerCase();
+  const confiancaLabel = confianca === 'alto' ? 'Alta' : (confianca === 'medio' ? 'Média' : 'Baixa');
+  const extensao = String(item.extensao_arquivo || '').trim().toUpperCase();
   const badgeClass = item.is_pdf ? 'material-badge is-pdf' : 'material-badge';
   const itemClass = item.is_pdf ? 'alert-item alert-item-partial material-item pdf-priority' : 'alert-item alert-item-partial material-item';
 
@@ -105,7 +108,9 @@ function renderMaterial(item) {
       <h4>${escapeHtml(item.titulo || 'Documento técnico')}</h4>
       <div class="meta">
         <span class="${badgeClass}">${escapeHtml(tipo)}</span>
-        <span>Fonte: ${escapeHtml(fonte)} · Confiança: ${escapeHtml(item.nivel_confianca || 'medio')}</span>
+        <span>Fonte: ${escapeHtml(fonte)}</span>
+        <span>Confiança: ${escapeHtml(confiancaLabel)}</span>
+        ${extensao ? `<span>Arquivo: ${escapeHtml(extensao)}</span>` : ''}
       </div>
       ${resumo ? `<p>${escapeHtml(resumo)}</p>` : ''}
       <a href="${escapeHtml(item.link)}" target="_blank" rel="noopener noreferrer">Abrir material</a>
