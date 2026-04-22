@@ -327,19 +327,22 @@ def _build_queries(registro: str, product: dict[str, Any]) -> list[SearchStrateg
     strategies: list[SearchStrategy] = []
     seen: set[str] = set()
 
-    # Busca objetiva e curta: poucas queries de alto valor.
+    # Busca objetiva e curta: prioriza variações não focadas em "manual" para
+    # evitar ficar preso em SERP com documentos genéricos de primeira página.
     if produto:
-        _add_query(strategies, seen, 'product_manual', f'{produto} manual', layer=1, intent='manual')
+        _add_query(strategies, seen, 'product_identity', f'{produto}', layer=1, intent='general')
         _add_query(strategies, seen, 'product_ifu', f'{produto} IFU', layer=1, intent='ifu')
+        _add_query(strategies, seen, 'product_recall', f'{produto} recall', layer=1, intent='recall')
 
     if fabricante and produto:
-        _add_query(strategies, seen, 'manufacturer_product_manual', f'{fabricante} {produto} manual', layer=2, intent='manual')
+        _add_query(strategies, seen, 'manufacturer_product_identity', f'{fabricante} {produto}', layer=2, intent='general')
+        _add_query(strategies, seen, 'manufacturer_product_ifu', f'{fabricante} {produto} IFU', layer=2, intent='ifu')
 
     if fabricante and modelo:
-        _add_query(strategies, seen, 'manufacturer_model_manual', f'{fabricante} {modelo} manual', layer=2, intent='manual')
+        _add_query(strategies, seen, 'manufacturer_model_identity', f'{fabricante} {modelo}', layer=2, intent='general')
 
     if produto:
-        _add_query(strategies, seen, 'product_recall', f'{produto} recall', layer=3, intent='recall')
+        _add_query(strategies, seen, 'product_manual', f'{produto} manual', layer=3, intent='manual')
 
     return strategies[:MATERIALS_MAX_STRATEGIES]
 
@@ -371,15 +374,15 @@ def _build_recommended_queries(identity: dict[str, str]) -> list[str]:
     if produto:
         suggestions.extend(
             [
-                f'{produto} manual',
                 f'{produto} IFU',
+                f'{produto} recall',
+                f'{produto} reclamação',
                 f'{produto} instruções de uso',
+                f'{produto} pdf',
+                f'{produto} manual',
                 f'{produto} service manual',
                 f'{produto} training',
-                f'{produto} recall',
                 f'{produto} forum',
-                f'{produto} reclamação',
-                f'{produto} pdf',
             ]
         )
     if fabricante and produto:
