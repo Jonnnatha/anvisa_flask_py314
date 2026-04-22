@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+from datetime import datetime
 from typing import Any
 from urllib.parse import quote_plus
 
@@ -110,5 +111,119 @@ def find_alerts_by_registration(registro: str) -> dict[str, Any]:
         'count': len(alerts),
         'alerts': alerts,
         'warning': sync.get('warning'),
+        'sync': sync,
+    }
+
+
+def _parse_date_br(value: str) -> datetime | None:
+    text = _clean(value)
+    if not text:
+        return None
+    try:
+        return datetime.strptime(text[:10], '%d/%m/%Y')
+    except ValueError:
+        return None
+
+
+def _normalize_text_filter(value: str) -> str:
+    return _clean(value).casefold()
+
+
+def search_alerts(
+    *,
+    fabricante: str = '',
+    registro: str = '',
+    nome_comercial: str = '',
+    nome_tecnico: str = '',
+    data_inicio: str = '',
+    data_fim: str = '',
+) -> dict[str, Any]:
+    sync = ensure_alerts_dataset()
+    alerts = [_normalize_alert_item(item) for item in _load_alerts_map().values()]
+
+    fabricante_q = _normalize_text_filter(fabricante)
+    registro_q = _normalize_registro(registro)
+    nome_comercial_q = _normalize_text_filter(nome_comercial)
+    nome_tecnico_q = _normalize_text_filter(nome_tecnico)
+    inicio = _parse_date_br(data_inicio)
+    fim = _parse_date_br(data_fim)
+
+    filtered: list[dict[str, Any]] = []
+    for alert in alerts:
+        if fabricante_q and fabricante_q not in _normalize_text_filter(alert.get('empresa', '')):
+            continue
+        if registro_q and registro_q not in _normalize_registro(alert.get('numero_registro_anvisa', '')):
+            continue
+        if nome_comercial_q and nome_comercial_q not in _normalize_text_filter(alert.get('nome_comercial', '')):
+            continue
+        if nome_tecnico_q and nome_tecnico_q not in _normalize_text_filter(alert.get('nome_tecnico', '')):
+            continue
+
+        alert_date = _parse_date_br(str(alert.get('data', '')))
+        if inicio and (not alert_date or alert_date < inicio):
+            continue
+        if fim and (not alert_date or alert_date > fim):
+            continue
+
+        filtered.append(alert)
+
+    filtered.sort(key=lambda item: int(item['numero_alerta']) if item.get('numero_alerta', '').isdigit() else -1, reverse=True)
+    return {
+        'status': 'ok',
+        'count': len(filtered),
+        'alerts': filtered,
+        'sync': sync,
+    }
+
+
+def summarize_alerts(
+    *,
+    periodo: str = 'diario',
+    referencia: str = '',
+    registros_base: list[str] | None = None,
+) -> dict[str, Any]:
+    normalized_period = (periodo or 'diario').strip().lower()
+    if normalized_period not in {'diario', 'mensal'}:
+        raise ValueError("periodo deve ser 'diario' ou 'mensal'.")
+
+    if referencia:
+        try:
+            ref = datetime.strptime(referencia, '%Y-%m-%d')
+        except ValueError as exc:
+            raise ValueError('referencia deve estar no formato YYYY-MM-DD.') from exc
+    else:
+        ref = datetime.now()
+
+    sync = ensure_alerts_dataset()
+    alerts = [_normalize_alert_item(item) for item in _load_alerts_map().values()]
+
+    selected: list[dict[str, Any]] = []
+    for alert in alerts:
+        dt = _parse_date_br(str(alert.get('data', '')))
+        if not dt:
+            continue
+        if normalized_period == 'diario' and dt.date() == ref.date():
+            selected.append(alert)
+        if normalized_period == 'mensal' and dt.year == ref.year and dt.month == ref.month:
+            selected.append(alert)
+
+    selected.sort(key=lambda item: int(item['numero_alerta']) if item.get('numero_alerta', '').isdigit() else -1, reverse=True)
+
+    registros_set = {_normalize_registro(item) for item in (registros_base or []) if _normalize_registro(item)}
+    matched: list[dict[str, Any]] = []
+    if registros_set:
+        for alert in selected:
+            registro_alerta = _normalize_registro(alert.get('numero_registro_anvisa', ''))
+            if registro_alerta and registro_alerta in registros_set:
+                matched.append(alert)
+
+    return {
+        'status': 'ok',
+        'periodo': normalized_period,
+        'referencia': ref.strftime('%Y-%m-%d'),
+        'total_alertas_periodo': len(selected),
+        'total_alertas_com_registro_da_base': len(matched),
+        'alertas': selected,
+        'alertas_registros_base': matched,
         'sync': sync,
     }
