@@ -509,6 +509,40 @@ def _parse_duckduckgo_page(query: str, timeout_s: float, max_results: int) -> di
         )
         if len(rows) >= max_results:
             break
+
+    if not rows:
+        seen_links: set[str] = set()
+        for anchor in soup.select('a.result__a, a[data-testid=\"result-title-a\"], .links_main a[href]'):
+            href = _clean(anchor.get('href'))
+            title = _clean(anchor.get_text(' ', strip=True))
+            if href.startswith('//duckduckgo.com/l/?'):
+                parsed_duck = urlparse(f'https:{href}')
+                resolved = parse_qs(parsed_duck.query).get('uddg', [''])[0]
+                href = _clean(unquote(resolved))
+            elif href.startswith('https://duckduckgo.com/l/?'):
+                parsed_duck = urlparse(href)
+                resolved = parse_qs(parsed_duck.query).get('uddg', [''])[0]
+                href = _clean(unquote(resolved))
+            if not href or not title or _is_blocked_domain(href):
+                continue
+            if href in seen_links:
+                continue
+            seen_links.add(href)
+
+            block = anchor.find_parent(class_=lambda css: css and 'result' in css)
+            snippet_node = block.select_one('.result__snippet, .result-snippet') if block else None
+            snippet = _clean(snippet_node.get_text(' ', strip=True)) if snippet_node else ''
+            rows.append(
+                {
+                    'titulo': title,
+                    'link': href,
+                    'resumo': snippet[:400],
+                    'contexto': _normalize(f'{title} {snippet} {href}'),
+                    'fonte': urlparse(href).netloc.lower(),
+                }
+            )
+            if len(rows) >= max_results:
+                break
     html_lower = body.casefold()
     blocked_hint = any(marker in html_lower for marker in ('captcha', 'unusual traffic', 'detected unusual'))
     empty_hint = any(marker in html_lower for marker in ('no results.', 'no  results.', 'não encontramos resultados'))
@@ -539,7 +573,7 @@ def _parse_google_page(query: str, timeout_s: float, max_results: int) -> dict[s
     rows: list[dict[str, str]] = []
     blocks_found = 0
 
-    for block in soup.select('div.g'):
+    for block in soup.select('div.g, div.MjjYud'):
         blocks_found += 1
         anchor = block.select_one('a[href]')
         title_node = block.select_one('h3')
@@ -574,6 +608,39 @@ def _parse_google_page(query: str, timeout_s: float, max_results: int) -> dict[s
         if len(rows) >= max_results:
             break
 
+    if not rows:
+        seen_links: set[str] = set()
+        for anchor in soup.select('a[href]:has(h3), div.yuRUbf > a[href], div.tF2Cxc a[href]'):
+            href = _clean(anchor.get('href'))
+            title_node = anchor.select_one('h3')
+            title = _clean(title_node.get_text(' ', strip=True)) if title_node else ''
+            if not href or not title:
+                continue
+            if href.startswith('/url?'):
+                parsed_google = urlparse(href)
+                extracted = parse_qs(parsed_google.query).get('q', [''])[0]
+                href = _clean(extracted)
+            if href.startswith('/search'):
+                continue
+            if href.startswith('/'):
+                href = f'https://www.google.com{href}'
+            if _is_blocked_domain(href) or href in seen_links:
+                continue
+            seen_links.add(href)
+            snippet_node = anchor.find_parent('div')
+            snippet = _clean(snippet_node.get_text(' ', strip=True)) if snippet_node else ''
+            rows.append(
+                {
+                    'titulo': title,
+                    'link': href,
+                    'resumo': snippet[:400],
+                    'contexto': _normalize(f'{title} {snippet} {href}'),
+                    'fonte': urlparse(href).netloc.lower(),
+                }
+            )
+            if len(rows) >= max_results:
+                break
+
     html_lower = body.casefold()
     blocked_hint = any(
         marker in html_lower
@@ -593,6 +660,21 @@ def _parse_google_page(query: str, timeout_s: float, max_results: int) -> dict[s
         'response_bytes': len(body.encode('utf-8', errors='ignore')),
         'blocked_hint': blocked_hint,
         'empty_hint': empty_hint,
+        'response_received': True,
+    }
+
+
+def _parse_govbr_page(query: str, timeout_s: float, max_results: int) -> dict[str, Any]:
+    encoded_query = quote_plus(query)
+    search_url = f'{GOVBR_SEARCH_URL}?SearchableText={encoded_query}'
+    result = _parse_search_page(search_url, query, timeout_s, max_results)
+    return {
+        'rows': result.get('rows', []),
+        'blocks_found': int(result.get('anchors_found', 0) or 0),
+        'http_status': 200,
+        'response_bytes': 0,
+        'blocked_hint': False,
+        'empty_hint': not result.get('rows'),
         'response_received': True,
     }
 
@@ -1250,6 +1332,7 @@ def find_related_materials(registro: str, product: dict[str, Any] | None = None)
 
     source_runners = (
         ('duckduckgo_search', _parse_duckduckgo_page),
+        ('govbr_search', _parse_govbr_page),
         ('google_search', _parse_google_page),
     )
 
@@ -1345,6 +1428,8 @@ def find_related_materials(registro: str, product: dict[str, Any] | None = None)
                     visited_urls.append(f'{GOOGLE_SEARCH_URL}?q={quote_plus(strategy.query)}')
                 elif source_name == 'duckduckgo_search':
                     visited_urls.append(f'{DUCKDUCKGO_HTML_URL}?q={quote_plus(strategy.query)}')
+                elif source_name == 'govbr_search':
+                    visited_urls.append(f'{GOVBR_SEARCH_URL}?SearchableText={quote_plus(strategy.query)}')
                 if source_log['blocks'] > 0 and not source_rows:
                     parse_failures += 1
                     source_log['status'] = 'parse_failure'
