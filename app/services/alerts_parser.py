@@ -9,6 +9,7 @@ from bs4 import BeautifulSoup
 from app.core.config import ALERTS_PAGE_URL
 
 ALERT_NUMBER_RE = re.compile(r'\b(\d{3,6})\b')
+ALERT_TITLE_NUMBER_RE = re.compile(r'alerta\s*[:\-#]?\s*(\d{3,6})', flags=re.IGNORECASE)
 DATE_RE = re.compile(r'(\d{2}/\d{2}/\d{4})')
 
 FIELD_MAP = {
@@ -56,7 +57,7 @@ def _normalize_text(value: Any) -> str:
 
 def parse_alert_list_item(card: Any) -> dict[str, str] | None:
     title = _normalize_text(card.select_one('p.titulo').get_text(' ', strip=True) if card.select_one('p.titulo') else '')
-    number_match = ALERT_NUMBER_RE.search(title)
+    number_match = ALERT_TITLE_NUMBER_RE.search(title) or ALERT_NUMBER_RE.search(title)
     if not number_match:
         return None
 
@@ -83,23 +84,26 @@ def _parse_product_identification_block(text: str) -> dict[str, str]:
     block_l = block.casefold()
     result: dict[str, str] = {}
 
-    for idx, (key, target) in enumerate(PRODUCT_KEYS):
-        pos = block_l.find(key)
-        if pos < 0:
-            continue
+    positions: list[tuple[int, str, str]] = []
+    for key, target in PRODUCT_KEYS:
+        start = 0
+        while True:
+            pos = block_l.find(key, start)
+            if pos < 0:
+                break
+            positions.append((pos, key, target))
+            start = pos + len(key)
 
+    positions.sort(key=lambda item: item[0])
+
+    for idx, (pos, key, target) in enumerate(positions):
         start = pos + len(key)
         while start < len(block) and block[start] in ': -\t\n':
             start += 1
 
-        end = len(block)
-        for next_key, _ in PRODUCT_KEYS[idx + 1 :]:
-            next_pos = block_l.find(next_key, start)
-            if next_pos >= 0:
-                end = min(end, next_pos)
-
+        end = positions[idx + 1][0] if idx + 1 < len(positions) else len(block)
         value = _normalize_text(block[start:end].strip().strip('.'))
-        if value:
+        if value and not result.get(target):
             result[target] = value
 
     return result

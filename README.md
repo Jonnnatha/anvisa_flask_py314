@@ -85,3 +85,5 @@ Principais opcionais:
 ## Endpoint da aplicação
 
 - `GET /api/consultar?registro=80146502070`
+- `GET /api/alertas?fabricante=&registro=&nome_comercial=&nome_tecnico=&data_inicio=DD/MM/AAAA&data_fim=DD/MM/AAAA`
+- `GET /api/relatorios/resumo?periodo=diario|mensal&referencia=YYYY-MM-DD&registros_base=80146502070,12345678901`
