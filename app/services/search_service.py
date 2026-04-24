@@ -81,6 +81,15 @@ def search_by_registration(value: str) -> dict[str, Any]:
     started_at = time.perf_counter()
     LOGGER.info('search.start registro=%s', registro)
 
+    alerts_result: dict[str, Any]
+    alerts_started = time.perf_counter()
+    try:
+        alerts_result = find_alerts_by_registration(registro)
+        LOGGER.info('search.alerts.success registro=%s duracao_ms=%s', registro, int((time.perf_counter() - alerts_started) * 1000))
+    except Exception as exc:
+        LOGGER.exception('search.alerts.error registro=%s erro=%s', registro, exc)
+        alerts_result = {'status': 'alerts_error', 'count': 0, 'alerts': [], 'warning': str(exc)}
+
     try:
         product_started = time.perf_counter()
         product = find_product_by_registration(registro)
@@ -107,18 +116,22 @@ def search_by_registration(value: str) -> dict[str, Any]:
         return result
 
     if not product:
-        LOGGER.info('search.product.not_found registro=%s', registro)
-        result['message'] = 'Registro não encontrado na API oficial de produtos para saúde da Anvisa.'
+        LOGGER.info('search.product.not_found registro=%s alerts_count=%s', registro, alerts_result.get('count', 0))
+        result.update(
+            {
+                'found': bool(alerts_result.get('alerts')),
+                'message': (
+                    'Registro não encontrado na API oficial de produtos para saúde da Anvisa, '
+                    'mas alertas relacionados foram encontrados.'
+                    if alerts_result.get('alerts')
+                    else 'Registro não encontrado na API oficial de produtos para saúde da Anvisa.'
+                ),
+                'alerts_count': alerts_result.get('count', 0),
+                'alerts_status': alerts_result.get('status'),
+                'alerts': alerts_result.get('alerts', []),
+            }
+        )
         return result
-
-    alerts_result: dict[str, Any]
-    alerts_started = time.perf_counter()
-    try:
-        alerts_result = find_alerts_by_registration(registro)
-        LOGGER.info('search.alerts.success registro=%s duracao_ms=%s', registro, int((time.perf_counter() - alerts_started) * 1000))
-    except Exception as exc:
-        LOGGER.exception('search.alerts.error registro=%s erro=%s', registro, exc)
-        alerts_result = {'status': 'alerts_error', 'count': 0, 'alerts': [], 'warning': str(exc)}
 
     enrichment_result = enrich_product_data(product, alerts=alerts_result.get('alerts', []))
     materials_product_context = dict(product)
