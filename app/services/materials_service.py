@@ -425,11 +425,10 @@ def _parse_search_page(search_url: str, query: str, timeout_s: float, max_result
 
     soup = BeautifulSoup(response.text, 'html.parser')
     rows: list[dict[str, str]] = []
-    anchors_found = 0
+    candidate_anchors = 0
     anchor_tokens = _query_anchor_tokens(query)
 
     for anchor in soup.select('a'):
-        anchors_found += 1
         href = _clean(anchor.get('href'))
         title = anchor.get_text(' ', strip=True)
         if not href or not title:
@@ -443,6 +442,7 @@ def _parse_search_page(search_url: str, query: str, timeout_s: float, max_result
         if not _safe_domain(href):
             continue
 
+        candidate_anchors += 1
         parent_text = anchor.parent.get_text(' ', strip=True) if anchor.parent else ''
         normalized_blob = _normalize(f'{title} {parent_text} {href}')
         has_query_anchor = any(_contains_haystack(normalized_blob, token) for token in anchor_tokens) if anchor_tokens else False
@@ -464,7 +464,7 @@ def _parse_search_page(search_url: str, query: str, timeout_s: float, max_result
         if len(rows) >= max_results:
             break
 
-    return {'rows': rows, 'anchors_found': anchors_found}
+    return {'rows': rows, 'anchors_found': candidate_anchors}
 
 
 def _parse_duckduckgo_page(query: str, timeout_s: float, max_results: int) -> dict[str, Any]:
@@ -1433,7 +1433,7 @@ def find_related_materials(registro: str, product: dict[str, Any] | None = None)
                     visited_urls.append(f'{DUCKDUCKGO_HTML_URL}?q={quote_plus(strategy.query)}')
                 elif source_name == 'govbr_search':
                     visited_urls.append(f'{GOVBR_SEARCH_URL}?SearchableText={quote_plus(strategy.query)}')
-                if source_log['blocks'] > 0 and not source_rows:
+                if source_log['blocks'] > 0 and not source_rows and not source_log['empty_hint']:
                     parse_failures += 1
                     source_log['status'] = 'parse_failure'
                     source_log['detail'] = 'blocks_without_valid_rows'
@@ -1726,10 +1726,14 @@ def find_related_materials(registro: str, product: dict[str, Any] | None = None)
         len(errors),
     )
 
+    warning_message = MATERIALS_STATUS_MESSAGES['success'] if status == 'success' else (
+        MATERIALS_STATUS_MESSAGES.get(status) or MATERIALS_AUTOSEARCH_WARNING
+    )
+
     return {
         'items': deduped[:max_items_final],
         'status': status,
-        'warning': MATERIALS_STATUS_MESSAGES.get(status) or MATERIALS_AUTOSEARCH_WARNING,
+        'warning': warning_message,
         'source': visited_urls,
         'recommended_searches': recommended_searches,
         'diagnostics': diagnostics,
